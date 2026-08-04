@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+
+# Third-party model weights — fetched by `python -m scripts.fetch_assets`.
+# Never commit these (~700 MB total).
+*.pth
+*.onnx
+*.task
+yolov8*.pt
+
+# The production ranker IS committed (2 MB) — keep it exempt from the *.pt rule.
+!image_filterer/model/ranker.pt
+
+# Run storage, feature cache, and datasets live outside the repo by default
+# ($IMAGE_FILTERER_DATA_ROOT). These entries only matter if someone points them in-tree.
+data/
+runs/
+cache/
+assets/
+dataset/
+*.db
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
