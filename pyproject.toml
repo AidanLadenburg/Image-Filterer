@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "image-filterer"
+version = "1.0.0"
+description = "Hero-shot selection and browsing for event photography"
+readme = "README.md"
+requires-python = ">=3.10"
+
+dependencies = [
+    "torch>=2.1",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "pillow>=10.0",
+    "flask>=3.0",
+    "opencv-python>=4.9",       # YuNet face detection
+    "open_clip_torch>=2.24",    # SigLIP2 context encoder + FaRL backbone
+    "mediapipe>=0.10",          # eyelid / mouth landmarks
+    "ultralytics>=8.2",         # YOLOv8-pose person detection
+    "tqdm>=4.65",
+]
+
+[project.optional-dependencies]
+# pyexiv2 reaches into Sony maker notes for the lens model, which PIL doesn't
+# surface. Without it, Sony bodies fall back to Make/Model for camera identity —
+# burst clustering still works, just slightly coarser on multi-Sony shoots.
+exif = ["pyexiv2>=2.8"]
+# Alternate context encoders (DINOv2, C-RADIO). Not needed for the default.
+encoders = ["transformers>=4.40"]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+image-filterer-server = "image_filterer.server:main"
+image-filterer-train = "image_filterer.train:main"
+
+[tool.setuptools.packages.find]
+include = ["image_filterer*"]
+
+[tool.setuptools.package-data]
+image_filterer = ["templates/*.html", "model/*.pt", "model/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,19 @@
+# Runtime dependencies. Mirrors [project.dependencies] in pyproject.toml —
+# `pip install -e .` is equivalent and preferred.
+#
+# torch: install the build that matches your CUDA version FIRST, from
+# https://pytorch.org/get-started/locally/ — the generic wheel below may be
+# CPU-only, which makes feature extraction ~20x slower.
+torch>=2.1
+numpy>=1.24
+pandas>=2.0
+pillow>=10.0
+flask>=3.0
+opencv-python>=4.9
+open_clip_torch>=2.24
+mediapipe>=0.10
+ultralytics>=8.2
+tqdm>=4.65
+
+# Optional: Sony lens-model EXIF reads for finer burst clustering.
+pyexiv2>=2.8
