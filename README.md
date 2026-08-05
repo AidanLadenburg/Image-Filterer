@@ -1,29 +1,20 @@
 # Image Filterer
 
-Point it at a folder of photos from a keynote or conference. It ranks them the
-way the photo team would, groups the near-identical frames together, and gives
-you a browser page for finding the keeper — by relevance ("the speaker on
-stage"), by how tight the framing is, or by subject.
-
-A shoot that produces 3,300 frames becomes about 730 moments to look through.
-
-```
-   folder of photos                                   what you get
-   ────────────────                                   ────────────
-   3,316 photos    ──────────────────────────────►    733 ranked moments
-                                                      search · filters · stars
-```
 
 > ### ⚠️ This is an alpha
 >
-> **The ranking will make mistakes.** It learned from one labeled shoot — about
-> 2,600 photos that a person sorted into "keepers" and "rejects" — and it has
-> never been tested against a different event. It is a first pass to save you
-> scrolling, not a replacement for your eye. Always look before you deliver.
+> **The ranking will make mistakes.** It learned from one labeled shoot, about
+> 2,600 photos and it has never been tested against a different event. Please don't
+> trust the rankings over your own intuition, or assume the best results will always
+> be at the very top
 >
 > **The feature list is not final.** Everything below can change. If something
-> doesn't work, works badly, or is missing, that's useful information — please
-> say so. See [Feedback](#feedback).
+> doesn't work, works badly, or is missing, that's useful information please
+> say so. Right now I am mostly adding features to see what sticks. Eventually
+> slimming the system down is a priority
+>
+> Many design decisions were made by me with a limited understanding of your
+> exact workflow. If something feels wrong/unintuitive definitely give feedback.
 
 ---
 
@@ -37,7 +28,7 @@ A shoot that produces 3,300 frames becomes about 730 moments to look through.
 | **Filter** | By framing (wide / medium / close), by subject (people / stage), or to solo hero shots only. |
 | **Open a moment** | Click a tile to see every frame in that burst, ordered best-first, and step through with ← / →. |
 | **Star the ones you want** | Click ☆ on any tile or frame. Stars are saved and shared with everyone looking at the same shoot. |
-| **Download** | One photo, your starred set, or a hand-picked selection — always the full-resolution original. |
+| **Download** | One photo, your starred set, or a hand-picked selection using select mode |
 | **Resize the grid** | Make thumbnails bigger or smaller with the **Size** control or the `+` / `−` keys. |
 
 ---
@@ -98,8 +89,7 @@ that's never what you get when you download.
 **Burst** — a group of near-identical frames shot within a few seconds of each
 other: the photographer holding down the shutter through one gesture. The grid
 shows **one tile per burst**, so eight shots of the same handshake take up one
-slot instead of eight. Click it to see all eight. This is the single biggest
-reason 3,300 photos collapse to 730 tiles.
+slot instead of eight. Click it to see all eight. 
 
 **Score** — the number in the bottom-right of a tile. It is **not** a percentage,
 a grade, or a quality rating, and the units mean nothing on their own. It is only
@@ -172,22 +162,6 @@ naming a person or a company.
 **A great photo is tagged "stage" instead of "people".**
 The people/stage and hero cut-offs were set by eye, and they're among the
 roughest parts of the system. Worth reporting when it looks wrong.
-
----
-
-## Feedback
-
-This is an alpha and the feature list is deliberately open. Especially useful:
-
-- Photos ranked far higher or lower than they deserve — a filename and shoot name
-  is enough
-- Filters or tags that are consistently wrong
-- Bursts that grouped things they shouldn't have, or split things they shouldn't
-- Anything you expected to be able to do and couldn't
-
-Corrections can be folded into a future version: the system can be retrained on a
-labeled set from a new shoot, which is the most direct way to make the ranking
-better on the material you actually shoot.
 
 ---
 ---
