@@ -42,12 +42,12 @@
   .badge.hero { background: #4a3a12; color: #f0c96b; border: 1px solid #7a5f20; }
   .badge.starred { background: #4a3a12; color: var(--star); border: 1px solid #7a5f20; }
   .shot-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; }
-  .zoom { display: inline-flex; align-items: center; gap: 5px; }
-  .zoom .zbtn { cursor: pointer; background: #1d212a; border: 1px solid var(--border); border-radius: 6px;
+  .ctl { display: inline-flex; align-items: center; gap: 5px; }
+  .ctl .zbtn { cursor: pointer; background: #1d212a; border: 1px solid var(--border); border-radius: 6px;
     width: 26px; height: 26px; display: flex; align-items: center; justify-content: center;
     font-size: 16px; line-height: 1; padding: 0; }
-  .zoom .zbtn:hover:not(:disabled) { border-color: #3a4152; }
-  .zoom .zbtn:disabled { opacity: .35; cursor: default; }
+  .ctl .zbtn:hover:not(:disabled) { border-color: #3a4152; }
+  .ctl .zbtn:disabled { opacity: .35; cursor: default; }
   #zoom-select { padding: 4px 6px; font-size: 12px; }
   .search-box { display: inline-flex; align-items: center; gap: 4px; }
   #search-input { width: 260px; max-width: 32vw; }
@@ -106,9 +106,35 @@
     font-size: 11px; font-family: ui-monospace, monospace; }
   .rel-chip { background: var(--accent); color: #0e0f12; font-weight: 700; font-size: 10px;
     padding: 1px 6px; border-radius: 999px; font-family: ui-monospace, monospace; }
+  .time-chip { background: #1b2733; color: #8fb6d8; border-radius: 6px; padding: 1px 6px;
+    font-size: 11px; font-family: ui-monospace, monospace; }
   .score-chip { color: var(--text-dim); font-size: 11px; font-family: ui-monospace, monospace; margin-left: auto; }
   .filename { font-size: 12px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .badges { display: flex; gap: 5px; margin-top: 6px; flex-wrap: wrap; }
+  .badges { display: flex; gap: 5px; margin-top: 6px; flex-wrap: wrap; align-items: center; }
+  /* download affordance — bottom-right of the tile, under the score */
+  .dl-btn { margin-left: auto; cursor: pointer; background: #1d212a; border: 1px solid var(--border);
+    color: var(--text-dim); border-radius: 6px; padding: 1px 7px; font-size: 12px; line-height: 1.5; }
+  .dl-btn:hover { color: var(--accent); border-color: var(--accent); }
+  .dl-btn.busy { opacity: .5; pointer-events: none; }
+
+  /* selection mode */
+  .tile.selectable { cursor: copy; }
+  .tile.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .sel-box { position: absolute; top: 6px; left: 6px; width: 22px; height: 22px; border-radius: 5px;
+    border: 1px solid rgba(255,255,255,.35); background: rgba(14,15,18,.6); color: transparent;
+    display: none; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; }
+  .grid.selecting .sel-box { display: flex; }
+  .tile.selected .sel-box { background: var(--accent); border-color: var(--accent); color: #0e0f12; }
+  .pill.select-pill.active { background: var(--accent); border-color: var(--accent); color: #0e0f12; font-weight: 700; }
+
+  /* action bar above the grid (starred download / selection actions) */
+  .action-bar { display: none; align-items: center; gap: 10px; flex-wrap: wrap;
+    margin-bottom: 12px; padding: 9px 12px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 9px; }
+  .action-bar.show { display: flex; }
+  .action-bar .ab-note { color: var(--text-dim); font-size: 12px; }
+  .btn.dl-primary { background: var(--good); border-color: var(--good); color: #0e0f12; font-weight: 600; }
+  .btn.dl-primary:disabled { opacity: .5; cursor: default; }
   .badge { font-size: 10px; padding: 1px 6px; border-radius: 5px; background: #23252d; color: var(--text-dim); }
   .badge.shot-wide, .badge.shot-medium, .badge.shot-close {
     background: #2a2333; color: #cdb6e6; border: 1px solid #4a3d5c; text-transform: capitalize; }
@@ -140,10 +166,14 @@
   .frame-row .info { min-width: 0; }
   .frame-row .fn { font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .frame-row .sc { font-size: 11px; font-family: ui-monospace, monospace; color: var(--text-dim); }
-  .frame-row .star-mini { margin-left: auto; align-self: center; background: none; border: none;
+  .frame-row .acts { margin-left: auto; align-self: center; display: flex; align-items: center; gap: 2px; }
+  .frame-row .star-mini { background: none; border: none;
     cursor: pointer; color: #4d5462; font-size: 15px; padding: 2px 3px; line-height: 1; }
   .frame-row .star-mini:hover { color: var(--star); }
   .frame-row .star-mini.on { color: var(--star); }
+  .frame-row .dl-mini { background: none; border: none; cursor: pointer; color: #4d5462;
+    font-size: 13px; padding: 2px 3px; line-height: 1; }
+  .frame-row .dl-mini:hover { color: var(--accent); }
   #modal-star { display: inline-flex; align-items: center; gap: 6px; margin-top: 10px; }
   #modal-star.on { color: var(--star); border-color: #7a5f20; background: #2c2411; }
   .hard { color: #ff9090; font-size: 10px; }
@@ -173,7 +203,15 @@
   </div>
   <span class="pill hero-pill" id="hero-pill" title="Only clean solo hero shots">Hero</span>
   <span class="pill star-pill" id="star-pill" title="Only frames you've starred (S in the viewer)">★ Starred</span>
-  <div class="zoom spacer" title="Thumbnail size — + / − to step, 0 to reset">
+  <span class="pill select-pill" id="select-pill" title="Select multiple frames to download together">☑ Select</span>
+  <span class="ctl" title="Ordering">
+    <span class="shot-label">Sort</span>
+    <select id="sort-select">
+      <option value="rank">Best first</option>
+      <option value="time">Chronological</option>
+    </select>
+  </span>
+  <div class="ctl spacer" title="Thumbnail size — + / − to step, 0 to reset">
     <span class="shot-label">Size</span>
     <button class="zbtn" id="zoom-out" aria-label="Smaller thumbnails">−</button>
     <select id="zoom-select" aria-label="Thumbnail size"></select>
@@ -218,12 +256,19 @@
     <div class="big">No run selected</div>
     <div>Upload a folder of images to ingest and browse the ranked results.</div>
   </div>
+  <div class="action-bar" id="action-bar">
+    <button class="btn dl-primary" id="dl-action">⬇ Download</button>
+    <button class="btn" id="sel-all" style="display:none">Select all loaded</button>
+    <button class="btn" id="sel-clear" style="display:none">Clear</button>
+    <button class="btn" id="clear-starred" style="display:none">☆ Clear starred</button>
+    <span class="ab-note" id="ab-note"></span>
+  </div>
   <div class="grid" id="grid"></div>
   <div class="load-more-bar" id="load-more-bar">
     <span class="progress-count" id="progress-count"></span>
     <button class="btn" id="load-more">Load more</button>
   </div>
-  <div class="footer-hint" id="footer-hint" style="display:none">Click a tile to expand the burst. ← / → to step. S to star the frame. Esc to close. + / − to resize thumbnails.</div>
+  <div class="footer-hint" id="footer-hint" style="display:none">Click a tile to expand the burst. ← / → to step. S to star, D to download. Esc to close. + / − to resize thumbnails.</div>
 </main>
 
 <div class="modal-bg" id="modal-bg">
@@ -256,6 +301,9 @@ const state = {
   starredOnly: false,      // the "★ Starred" view toggle
   stars: new Set(),        // starred frame paths, mirrored from the server
   openFrame: null,         // frame shown in the modal — target of the S shortcut
+  selectMode: false,       // click selects instead of opening
+  selected: new Set(),     // frame paths chosen for a bulk download
+  sort: "rank",            // "rank" (best first) | "time" (chronological)
 };
 const imgUrl = p => "/img?path=" + encodeURIComponent(p);
 const thumbUrl = (p, w) => "/thumb?path=" + encodeURIComponent(p) + "&w=" + (w || 320);
@@ -304,6 +352,7 @@ function buildQuery(offset, limit) {
   if (state.shots.size) p.set("shot", [...state.shots].join(","));
   if (state.subject) p.set("subject", state.subject);
   if (state.hero) p.set("hero", "1");
+  if (state.sort !== "rank") p.set("sort", state.sort);
   if (state.query) {
     p.set("q", state.query);
     if (state.starredOnly) p.set("starred", "1");
@@ -311,6 +360,81 @@ function buildQuery(offset, limit) {
   }
   // No query: the starred view is a flat list of frames, not of bursts.
   return (state.starredOnly ? "/api/starred?" : "/api/bursts?") + p;
+}
+
+// ---- downloads ----
+// Everything here hands back originals, never the preview renditions.
+const dlUrl = p => "/download?path=" + encodeURIComponent(p);
+const fmtBytes = n =>
+  n >= 1e9 ? (n / 1e9).toFixed(1) + " GB" : n >= 1e6 ? Math.round(n / 1e6) + " MB"
+           : Math.max(1, Math.round(n / 1e3)) + " KB";
+
+function downloadOne(path, btn) {
+  if (btn) { btn.classList.add("busy"); setTimeout(() => btn.classList.remove("busy"), 800); }
+  // A plain anchor click keeps this a native browser download — no JS buffering.
+  const a = document.createElement("a");
+  a.href = dlUrl(path); a.download = "";
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+/** Zip a selection. `body` is {scope:"starred"} or {paths:[…]}. */
+async function downloadMany(body, btn) {
+  const label = btn ? btn.textContent : null;
+  if (btn) { btn.disabled = true; btn.textContent = "Preparing…"; }
+  try {
+    const res = await fetch("/api/download/prepare", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const d = await res.json();
+    if (!res.ok) { alert(d.error || "Could not prepare the download."); return; }
+    // Big archives are slow and easy to trigger by accident — confirm first.
+    if (d.bytes > 1e9 &&
+        !confirm(`${d.count} images, ${fmtBytes(d.bytes)}. This may take a while — continue?`)) return;
+    if (d.missing) console.warn(`${d.missing} file(s) were missing and are excluded`);
+    window.location = "/api/download/zip?token=" + encodeURIComponent(d.token);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = label; }
+  }
+}
+
+// ---- selection mode ----
+function toggleSelect(path, tile) {
+  if (state.selected.has(path)) { state.selected.delete(path); tile.classList.remove("selected"); }
+  else { state.selected.add(path); tile.classList.add("selected"); }
+  updateActionBar();
+}
+function clearSelection() {
+  state.selected.clear();
+  $$("#grid .tile.selected").forEach(t => t.classList.remove("selected"));
+  updateActionBar();
+}
+
+/** The bar above the grid: selection actions, or the starred-view download. */
+function updateActionBar() {
+  const bar = $("#action-bar"), btn = $("#dl-action"), note = $("#ab-note");
+  const selecting = state.selectMode, starred = state.starredOnly && !state.query;
+  $("#sel-all").style.display = selecting ? "" : "none";
+  $("#sel-clear").style.display = selecting ? "" : "none";
+  const cs = $("#clear-starred");
+  cs.style.display = (!selecting && starred) ? "" : "none";
+  cs.disabled = !state.stars.size;
+  cs.textContent = state.stars.size ? `☆ Clear all ${state.stars.size}` : "☆ Clear starred";
+  if (selecting) {
+    const n = state.selected.size;
+    btn.textContent = n ? `⬇ Download ${n} selected` : "⬇ Download selected";
+    btn.disabled = !n;
+    note.textContent = n ? "Full-resolution originals, as a .zip" : "Click tiles to select them.";
+    bar.classList.add("show");
+  } else if (starred) {
+    const n = state.stars.size;
+    btn.textContent = `⬇ Download all ${n} starred`;
+    btn.disabled = !n;
+    note.textContent = n ? "Full-resolution originals, as a .zip" : "";
+    bar.classList.toggle("show", state.hasRun);
+  } else {
+    bar.classList.remove("show");
+  }
 }
 
 // ---- stars ----
@@ -353,6 +477,7 @@ function paintStars() {
   const n = state.stars.size;
   const pill = $("#star-pill");
   if (pill) pill.textContent = n ? `★ Starred (${n})` : "★ Starred";
+  updateActionBar();
 }
 
 function renderTiles(bursts, append) {
@@ -366,6 +491,7 @@ function renderTiles(bursts, append) {
     tile.innerHTML = `
       <div class="img-wrap">
         <img loading="lazy" data-path="${esc(b.rep_path)}" src="${thumbUrl(b.rep_path, thumbBucket(zoomPct))}" />
+        <span class="sel-box">✓</span>
         <button class="star-btn" data-star-path="${esc(b.rep_path)}"
                 title="Star this frame">☆</button>
       </div>
@@ -373,6 +499,7 @@ function renderTiles(bursts, append) {
         <div class="row1">
           ${b.relevance != null ? `<span class="rel-chip" title="relevance">${b.relevance.toFixed(3)}</span>` : ""}
           <span class="rank-chip" title="hero rank">#${b.burst_rank}</span>
+          ${b.captured_at ? `<span class="time-chip" title="${esc(b.captured_at)}">${esc(b.captured_at.slice(11, 19))}</span>` : ""}
           <span class="score-chip" title="hero score">${(b.score_s12_after_hard ?? b.score_s1).toFixed(2)}</span>
         </div>
         <div class="filename" title="${esc(b.rep_filename)}">${esc(b.rep_filename)}</div>
@@ -383,11 +510,18 @@ function renderTiles(bursts, append) {
           ${b.shot_type ? `<span class="badge shot-${b.shot_type}">${b.shot_type}</span>` : ""}
           ${b.subject_class === "stage" ? '<span class="badge">stage</span>' : ""}
           ${b.match_within_burst_rank && b.match_within_burst_rank>1 ? `<span class="badge">match #${b.match_within_burst_rank}</span>` : ""}
+          <button class="dl-btn" title="Download the full-resolution original">⬇</button>
         </div>
       </div>`;
-    tile.addEventListener("click", () => openModal(b));
+    if (state.selected.has(b.rep_path)) tile.classList.add("selected");
+    tile.addEventListener("click", () => {
+      if (state.selectMode) toggleSelect(b.rep_path, tile);
+      else openModal(b);
+    });
     const sb = tile.querySelector(".star-btn");
     sb.addEventListener("click", e => { e.stopPropagation(); toggleStar(b.rep_path, sb); });
+    const db = tile.querySelector(".dl-btn");
+    db.addEventListener("click", e => { e.stopPropagation(); downloadOne(b.rep_path, db); });
     grid.appendChild(tile);
   }
   paintStars();
@@ -424,6 +558,7 @@ function updateBar() {
   }
   $("#load-more-bar").style.display = total === 0 ? "none" : "flex";
   $("#footer-hint").style.display = total === 0 ? "none" : "block";
+  updateActionBar();
 }
 
 async function loadPage(reset) {
@@ -472,10 +607,15 @@ async function openModal(burst) {
         <div class="sc">score ${f.score_s12_after_hard.toFixed(2)}${f.shot_type ? " · " + f.shot_type : ""}</div>
         ${f.tech_hard_reject ? `<div class="hard">REJ: ${esc(f.tech_hard_reject_reason || "hard")}</div>` : ""}
       </div>
-      <button class="star-mini" data-star-path="${esc(f.path)}" title="Star this frame">☆</button>`;
+      <span class="acts">
+        <button class="star-mini" data-star-path="${esc(f.path)}" title="Star this frame">☆</button>
+        <button class="dl-mini" title="Download the full-resolution original">⬇</button>
+      </span>`;
     row.addEventListener("click", () => select(f, row));
     const sm = row.querySelector(".star-mini");
     sm.addEventListener("click", e => { e.stopPropagation(); toggleStar(f.path, sm); });
+    const dm = row.querySelector(".dl-mini");
+    dm.addEventListener("click", e => { e.stopPropagation(); downloadOne(f.path, dm); });
     strip.appendChild(row); rows.push({ row, f });
   });
   function select(f, row) {
@@ -494,8 +634,10 @@ async function openModal(burst) {
       <div style="font-size:11px;color:var(--text-dim);margin-top:8px;word-break:break-all">${esc(f.filename)}</div>
       <div style="font-size:11px;color:var(--text-dim);margin-top:8px">burst #${burst.burst_rank} · ${burst.burst_size} frame${burst.burst_size===1?"":"s"}</div>
       <a href="${imgUrl(f.path)}" target="_blank" rel="noopener" style="font-size:12px;color:var(--accent);display:inline-block;margin-top:8px">open full-res ↗</a>
-      <div><button class="btn" id="modal-star" data-star-path="${esc(f.path)}" title="Star this frame (S)">☆ Star this frame</button></div>`;
+      <div><button class="btn" id="modal-star" data-star-path="${esc(f.path)}" title="Star this frame (S)">☆ Star this frame</button></div>
+      <div><button class="btn" id="modal-dl" style="margin-top:6px" title="Download the full-resolution original (D)">⬇ Download original</button></div>`;
     $("#modal-star").addEventListener("click", () => toggleStar(f.path, null));
+    $("#modal-dl").addEventListener("click", () => downloadOne(f.path, null));
     paintStars();
   }
   // Open on the frame the tile was showing — for search hits and starred frames
@@ -541,6 +683,7 @@ async function selectRun(id) {
   if (!id) { state.hasRun = false; state.bursts = []; $("#grid").innerHTML = ""; state.total = 0; updateBar(); return; }
   await fetch("/api/select_run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ run_id: id }) });
   state.hasRun = true; state.query = ""; $("#search-input").value = ""; $("#search-clear").style.display = "none";
+  clearSelection();       // a selection from the previous run means nothing here
   await refreshStars();   // stars are per-run, so re-mirror them before painting
   loadPage(true);
 }
@@ -608,6 +751,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#zoom-select").addEventListener("change", e => setZoom(parseInt(e.target.value, 10)));
   $("#zoom-in").addEventListener("click", () => nudgeZoom(1));
   $("#zoom-out").addEventListener("click", () => nudgeZoom(-1));
+
+  // sort order — search stays relevance-ordered, so the control is moot there
+  $("#sort-select").addEventListener("change", e => {
+    state.sort = e.target.value;
+    loadPage(true);
+  });
   $("#run-select").addEventListener("change", e => selectRun(parseInt(e.target.value) || 0));
 
   // shot pills
@@ -642,6 +791,39 @@ document.addEventListener("DOMContentLoaded", async () => {
     loadPage(true);
   });
 
+  // Select mode
+  $("#select-pill").addEventListener("click", () => {
+    state.selectMode = !state.selectMode;
+    $("#select-pill").classList.toggle("active", state.selectMode);
+    $("#grid").classList.toggle("selecting", state.selectMode);
+    if (!state.selectMode) clearSelection();
+    updateActionBar();
+  });
+  $("#sel-clear").addEventListener("click", clearSelection);
+  $("#sel-all").addEventListener("click", () => {
+    // "loaded" is deliberate: selecting rows the user hasn't seen (and could be
+    // thousands of frames / many GB) shouldn't be one unlabelled click away.
+    state.bursts.forEach(b => state.selected.add(b.rep_path));
+    $$("#grid .tile").forEach(t => t.classList.add("selected"));
+    updateActionBar();
+  });
+  $("#dl-action").addEventListener("click", e => {
+    if (state.selectMode) downloadMany({ paths: [...state.selected] }, e.target);
+    else downloadMany({ scope: "starred" }, e.target);
+  });
+  $("#clear-starred").addEventListener("click", async () => {
+    const n = state.stars.size;
+    if (!n) return;
+    // Stars are shared across everyone viewing this run, so this can discard
+    // someone else's picks — never do it on a single unconfirmed click.
+    if (!confirm(`Unstar all ${n} frame${n === 1 ? "" : "s"} in this run?\n\n` +
+                 `Stars are shared with everyone viewing it. This can't be undone.`)) return;
+    const res = await fetch("/api/stars/clear", { method: "POST" });
+    if (!res.ok) { alert("Could not clear stars."); return; }
+    await refreshStars();
+    loadPage(true);
+  });
+
   // search
   const si = $("#search-input"); let t = null;
   const doSearch = () => {
@@ -671,6 +853,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       else if ((e.key === "s" || e.key === "S") && state.openFrame) {
         e.preventDefault();
         toggleStar(state.openFrame.path, null);
+      }
+      else if ((e.key === "d" || e.key === "D") && state.openFrame) {
+        e.preventDefault();
+        downloadOne(state.openFrame.path, null);
       }
       return;
     }

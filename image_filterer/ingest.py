@@ -149,11 +149,28 @@ def ingest_folder(
                 cb(84 + 6 * (i + 1) / n, f"Detecting people… {i+1}/{n}")
         an.close()
 
+    # Capture time, so the viewer can offer chronological order without having to
+    # re-read EXIF for the whole run later. Falls back to mtime when a frame has
+    # no DateTimeOriginal. ~0.3 ms/frame.
+    from .bursts import read_frame_meta
+    captured: List[str] = []
+    for p in paths:
+        meta = read_frame_meta(p)
+        if meta is not None:
+            captured.append(meta.captured_at.isoformat(sep=" "))
+        else:
+            try:
+                from datetime import datetime as _dt
+                captured.append(_dt.fromtimestamp(p.stat().st_mtime).isoformat(sep=" "))
+            except OSError:
+                captured.append("")
+
     rows = []
     for i in range(len(bundles)):
         rows.append({
             "filename": paths[i].name,
             "path": str(paths[i]),
+            "captured_at": captured[i],
             "score_s1": float(s1[i]),
             "score_s12": float(s12[i]),
             "score_s12_after_hard": float(s12_after_hard[i]),

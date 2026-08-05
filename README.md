@@ -1,22 +1,201 @@
 # Image Filterer
 
-Hero-shot selection for event photography. Point it at a folder of unlabeled
-photos from a keynote or a conference; it ranks them the way the photo team
-would, collapses burst sequences down to one frame each, and serves a browser UI
-for finding the keeper — by relevance ("the speaker on stage"), by shot scale, or
-by subject.
+Point it at a folder of photos from a keynote or conference. It ranks them the
+way the photo team would, groups the near-identical frames together, and gives
+you a browser page for finding the keeper — by relevance ("the speaker on
+stage"), by how tight the framing is, or by subject.
 
-A shoot that produces 3,300 frames becomes ~730 ranked moments. The team reviews
-the top of that list instead of the whole card.
+A shoot that produces 3,300 frames becomes about 730 moments to look through.
 
 ```
-   folder of photos                                    browser UI
-   ────────────────                                    ──────────
-   3,316 JPEGs   ──►  features ──►  ranker ──►  bursts  ──►  733 ranked moments
-                      (cached)      (MLP)      (EXIF+emb)     search · filters
+   folder of photos                                   what you get
+   ────────────────                                   ────────────
+   3,316 photos    ──────────────────────────────►    733 ranked moments
+                                                      search · filters · stars
 ```
+
+> ### ⚠️ This is an alpha
+>
+> **The ranking will make mistakes.** It learned from one labeled shoot — about
+> 2,600 photos that a person sorted into "keepers" and "rejects" — and it has
+> never been tested against a different event. It is a first pass to save you
+> scrolling, not a replacement for your eye. Always look before you deliver.
+>
+> **The feature list is not final.** Everything below can change. If something
+> doesn't work, works badly, or is missing, that's useful information — please
+> say so. See [Feedback](#feedback).
 
 ---
+
+## What you can do
+
+| | |
+|---|---|
+| **Browse by rank** | Best-guess keepers first, one tile per moment. |
+| **Browse by time** | Switch the **Sort** dropdown to *Chronological* to walk the event start to finish. |
+| **Search in plain English** | Type "person at a podium", "robot on stage", "wide shot of the crowd". No tags or keywords needed. |
+| **Filter** | By framing (wide / medium / close), by subject (people / stage), or to solo hero shots only. |
+| **Open a moment** | Click a tile to see every frame in that burst, ordered best-first, and step through with ← / →. |
+| **Star the ones you want** | Click ☆ on any tile or frame. Stars are saved and shared with everyone looking at the same shoot. |
+| **Download** | One photo, your starred set, or a hand-picked selection — always the full-resolution original. |
+| **Resize the grid** | Make thumbnails bigger or smaller with the **Size** control or the `+` / `−` keys. |
+
+---
+
+## Getting started
+
+1. **Open the link** your admin shares — something like `http://<server>:8600/`.
+2. **Pick a shoot** from the dropdown at the top left.
+3. **Browse.** The best-guess keepers come first.
+
+### Adding a shoot
+
+Click **＋ Upload folder**. Two options:
+
+- **Folder on server** — paste a path that already exists on the machine (or a
+  mounted drive). Nothing is copied and it starts almost immediately. **Use this
+  whenever you can** — it is dramatically faster.
+- **Upload from device** — pick a folder on your own computer. Every photo has
+  to cross the network, so a large shoot can take a long time.
+
+Either way a progress bar tracks the work and the shoot loads when it's done.
+Only one shoot can be processed at a time; if someone else is already going,
+you'll see their progress and can wait or cancel.
+
+> RAW files (CR3, ARW) are **not supported** and get skipped. Export JPEGs.
+
+### Starring and downloading
+
+Hover a tile and click **☆** to star it. Click **★ Starred** in the header to
+see only the starred frames, where you'll also find:
+
+- **⬇ Download all N starred** — everything starred, as one `.zip`
+- **☆ Clear all N** — unstar everything (asks first; this affects everyone)
+
+For a one-off, click **⬇** in the bottom-right of any tile. To grab a specific
+set, click **☑ Select**, click the tiles you want, then **⬇ Download N
+selected**.
+
+**Every download is the full-resolution original file** — the same bytes off the
+card. The images on screen are small stand-ins so the page loads quickly, but
+that's never what you get when you download.
+
+### Keyboard shortcuts
+
+| Key | Does |
+|---|---|
+| `←` `→` | Previous / next moment |
+| `S` | Star the photo you're looking at |
+| `D` | Download the photo you're looking at |
+| `Esc` | Close |
+| `+` `−` | Bigger / smaller thumbnails |
+| `0` | Reset thumbnail size |
+
+---
+
+## What the words mean
+
+**Burst** — a group of near-identical frames shot within a few seconds of each
+other: the photographer holding down the shutter through one gesture. The grid
+shows **one tile per burst**, so eight shots of the same handshake take up one
+slot instead of eight. Click it to see all eight. This is the single biggest
+reason 3,300 photos collapse to 730 tiles.
+
+**Score** — the number in the bottom-right of a tile. It is **not** a percentage,
+a grade, or a quality rating, and the units mean nothing on their own. It is only
+useful for *comparison*: a higher-scoring photo is one the system thinks is more
+likely to be a keeper than a lower-scoring one. A score of 6.7 is not "twice as
+good" as 3.4.
+
+**#Rank** — where that moment sits in the ordering. `#1` is the system's best
+guess at the strongest shot of the whole shoot.
+
+**Representative** — within a burst, the one frame the system picked as the best
+of that group. It's the one shown on the tile.
+
+**Hero** — one person clearly dominating the frame, nobody else prominent, and a
+clean dark background behind them. Think a portrait of a speaker with nothing
+distracting behind.
+
+**Shot: wide / medium / close** — how tight the framing is, *not* how big a face
+is. A frame-filling shot of a robot counts as "close" even though there's no
+person in it.
+
+**Subject: people / stage** — whether there's a prominent person in the
+foreground. "Stage" means an empty stage, a distant crowd, or a slide — no clear
+main subject.
+
+**Relevance** — only appears when you search. How well that photo matches the
+words you typed. Search results are ordered by this instead of by rank.
+
+**Shoot / run** — one processed folder of photos. Switch between them with the
+dropdown at the top.
+
+---
+
+## Common questions
+
+**A bad photo is ranked near the top. Why?**
+It's a first pass trained on a limited set. Blinks, soft focus, and awkward
+mid-gesture frames do slip through — especially when the subject is small in the
+frame, where the system's read on faces is least reliable. Star what's good and
+ignore the rest; the ordering is meant to save you scrolling, not to be trusted
+blindly.
+
+**Where did the rest of my photos go?**
+Nothing is deleted. Near-identical frames are grouped into one burst and only the
+best one is shown. Click the tile to see the whole group — the count is on the
+tile ("8 frames").
+
+**Two shots of the same moment appear as separate tiles.**
+Expected. Frames from two different cameras are never merged, so two
+photographers shooting the same gesture produce two bursts.
+
+**Does starring change the ranking?**
+No. Stars are just a list you're keeping. They don't teach the system anything —
+though a version that does is something we'd like to build, so tell us if you'd
+find it useful.
+
+**Can other people see my stars?**
+Yes. Stars are shared by everyone viewing the same shoot, so the team can build
+one pick list together. There's no per-person list, and no undo on **Clear all**.
+
+**Is the photo I download the full-quality one?**
+Yes, always — the original file, untouched. What you see in the grid and preview
+are smaller copies made for speed.
+
+**Search isn't finding something I know is there.**
+It matches on what a photo *looks like*, not on names or text. It has no idea who
+anyone is. Describe the scene ("two people shaking hands on stage") rather than
+naming a person or a company.
+
+**A great photo is tagged "stage" instead of "people".**
+The people/stage and hero cut-offs were set by eye, and they're among the
+roughest parts of the system. Worth reporting when it looks wrong.
+
+---
+
+## Feedback
+
+This is an alpha and the feature list is deliberately open. Especially useful:
+
+- Photos ranked far higher or lower than they deserve — a filename and shoot name
+  is enough
+- Filters or tags that are consistently wrong
+- Bursts that grouped things they shouldn't have, or split things they shouldn't
+- Anything you expected to be able to do and couldn't
+
+Corrections can be folded into a future version: the system can be retrained on a
+labeled set from a new shoot, which is the most direct way to make the ranking
+better on the material you actually shoot.
+
+---
+---
+
+# For developers and operators
+
+Everything below is setup, deployment, and internals. **If you're using the
+browser page, you can stop here.**
 
 ## Requirements
 
@@ -26,8 +205,6 @@ the top of that list instead of the whole card.
   hours. Developed on an RTX A6000.
 - **~5 GB disk** for model weights and the feature cache; the cache grows about
   **25 MB per 1,000 images**.
-
----
 
 ## Setup
 
@@ -65,8 +242,8 @@ but the first run will pause to download ~1.5 GB.
 already have — nothing needs recomputing, since cache keys are content hashes:
 
 ```bash
-python -m scripts.fetch_assets --from-cache /path/to/old/v3/cache
-export IMAGE_FILTERER_CACHE_DIR=/path/to/old/v3/cache
+python -m scripts.fetch_assets --from-cache /path/to/old/cache
+export IMAGE_FILTERER_CACHE_DIR=/path/to/old/cache
 ```
 
 Verify the install:
@@ -74,8 +251,6 @@ Verify the install:
 ```bash
 pip install -e ".[dev]" && pytest        # smoke tests, no GPU or weights needed
 ```
-
----
 
 ## Configuration
 
@@ -91,15 +266,14 @@ checkout, a container, or an install. All are optional.
 | `IMAGE_FILTERER_TRAIN_ROOT` | `./dataset` | Labeled data, training only |
 
 Run storage deliberately defaults **outside the repo** so that git operations,
-cleanups, or a `rm -rf` in the working tree can never destroy live runs.
+cleanups, or a `rm -rf` in the working tree can never destroy live runs. In
+particular, `git clean -xdf` would delete an in-tree data root.
 
 Model behavior lives in `image_filterer/config.py` — every tunable is a
 dataclass field with a comment explaining which experiment settled its value. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) before changing any of them.
 
----
-
-## Running in production
+## Running
 
 The repo ships a trained model, so serving works immediately after setup:
 
@@ -134,22 +308,6 @@ instead:
 ssh -L 8600:localhost:8600 you@<host>     # then open http://localhost:8600
 ```
 
-### Adding a shoot
-
-The UI starts empty. Open the upload panel and pick one of two paths:
-
-- **Folder on server (fast)** — paste a path that already exists on the machine
-  (or a mounted share). Nothing is uploaded; images are read and served in place.
-  Use this whenever the photos are already on or near the box.
-- **Upload from device** — pick a local folder; the browser sends it in batches
-  of 200 files. Uploading doesn't hold the ingest lock, so several people can
-  upload at once — but every original crosses the network, so for large or
-  RAW-heavy shoots the first option is much faster.
-
-Either way a progress bar tracks extraction → scoring → clustering → tagging, and
-the run loads automatically when it finishes. Switch runs with the header
-dropdown.
-
 ### Behavior under load
 
 - **Ingestion is single-flight.** A second concurrent ingest gets a `409` with a
@@ -161,16 +319,17 @@ dropdown.
 - **Reads scale.** Browsing and search are read-only and run concurrently;
   verified with 8 simultaneous searches. The text encoder is built once and
   shared.
-- **Tuned for VPN use** — grid thumbnails are ~6–8 KB, and opening a photo
-  streams a ~1600px preview (~100–300 KB) rather than the 8 MB original, with an
-  "open full-res ↗" link when you want it. Both are sent `Cache-Control:
-  immutable`.
+- **Tuned for remote viewing** — grid thumbnails are ~6–8 KB at the default zoom
+  and opening a photo streams a ~1600px preview (~150–300 KB) rather than the
+  8 MB original. Both are sent `Cache-Control: immutable`. The thumbnail cache is
+  bounded by bytes as well as entries, since zoomed-in grids request larger
+  renditions.
+- **Downloads stream.** Bulk downloads are zipped (STORED, not deflated — JPEGs
+  don't compress) and streamed, so a multi-GB archive costs almost no memory.
 
 For heavier load, put it behind gunicorn and a reverse proxy — the app factory is
 `image_filterer.server:create_app`. **There is no authentication**; the service
 assumes a trusted network. Add auth at the proxy if you expose it.
-
----
 
 ## Training a model
 
@@ -239,20 +398,17 @@ The checkpoint stores the feature-group flags it was trained with, and ingestion
 rebuilds the input vector from *those*, not from the current config. An older
 checkpoint keeps scoring correctly even after config changes.
 
----
-
-## What the filters mean
+## How the filters are derived
 
 | Filter | Values | How it's derived |
 |---|---|---|
 | **Search** | free text | SigLIP2 text tower against cached image embeddings — same joint space, no re-embedding. Warm queries ~50 ms. |
-| **Shot** | wide / medium / close | Zero-shot SigLIP2 wide↔close axis. This is *framing scale*, not face size — "close" includes a frame-filling robot. |
-| **Subject** | people / stage | Largest YOLO person box vs. frame area. "stage" = empty stage, distant crowd, or a slide — no main focus. |
-| **★ Hero** | on / off | One dominant person, no second prominent person, clean dark background. "The speaker alone, nothing behind them." |
+| **Shot** | wide / medium / close | Zero-shot SigLIP2 wide↔close axis. This is *framing scale*, not face size. |
+| **Subject** | people / stage | Largest YOLO person box vs. frame area. |
+| **★ Hero** | on / off | One dominant person, no second prominent person, clean dark background. |
+| **Sort** | rank / time | Rank uses the burst representative's score; time uses EXIF `DateTimeOriginal` (falling back to mtime), cached per run. |
 
 All of them AND together, and all combine with search.
-
----
 
 ## Run outputs
 
@@ -260,39 +416,41 @@ Each ingested folder becomes a run under `$IMAGE_FILTERER_DATA_ROOT/runs/run0001
 
 | File | Contents |
 |---|---|
-| `ranked.csv` | one row per unique frame: scores, burst columns, `shot_type`, `subject_class`, `is_hero`, technical metrics |
+| `ranked.csv` | one row per unique frame: scores, burst columns, `shot_type`, `subject_class`, `is_hero`, `captured_at`, technical metrics |
 | `bursts.csv` | one row per burst (its representative), ranked |
 | `search_index.npy` | full-frame embeddings, row-aligned to `ranked.csv` |
+| `stars.json` | starred frame paths (created on first star) |
+| `captured_at.json` | EXIF timestamp cache, backfilled for runs predating the `captured_at` column |
 | `config.json` | the exact config used |
 | `uploads/` | the images, for browser uploads only (absent for "folder on server" runs) |
 
 `ranked.csv` is the export path — hand it to anyone who wants the ordering
 without the UI.
 
----
-
 ## HTTP API
 
 | Route | Purpose |
 |---|---|
 | `GET /` | the UI |
-| `GET /api/state` | current run + all runs |
-| `GET /api/runs` | runs only |
+| `GET /api/state` · `/api/runs` | current run + all runs |
 | `POST /api/upload/start` · `/chunk` · `/finish` | batched browser upload → creates a run |
 | `POST /api/ingest_path` | `{path, name}` — ingest a folder already on the server |
 | `GET /api/ingest/status?run_id=` | progress for one ingest |
-| `GET /api/active` | the ingest running right now |
-| `POST /api/cancel_ingest` | cooperative cancel |
+| `GET /api/active` · `POST /api/cancel_ingest` | the running ingest; cooperative cancel |
 | `POST /api/select_run` | `{run_id}` — load a ready run |
-| `GET /api/bursts?shot=&subject=&hero=&offset=&limit=` | ranked bursts |
+| `GET /api/bursts?shot=&subject=&hero=&sort=&offset=&limit=` | ranked bursts |
 | `GET /api/burst/<id>` | frames within a burst |
-| `GET /api/search?q=&shot=&subject=&hero=` | semantic search |
+| `GET /api/search?q=&shot=&subject=&hero=&starred=` | semantic search |
+| `GET /api/stars` · `POST /api/star` · `POST /api/stars/clear` | read / toggle / clear stars |
+| `GET /api/starred?shot=&subject=&hero=&sort=` | starred frames, one entry per frame |
+| `GET /download?path=` | one original, as an attachment |
+| `POST /api/download/prepare` | `{scope:"starred"}` or `{paths:[…]}` → `{token, count, bytes}` |
+| `GET /api/download/zip?token=` | streams the prepared archive |
 | `GET /img` · `GET /thumb?w=` | image bytes (path-allowlisted to the run's tree) |
 
 `shot` is comma-separated multi-select (`wide,medium,close`); `subject` is a
-single value (`people`\|`stage`); `hero=1` restricts to hero shots.
-
----
+single value (`people`\|`stage`); `hero=1` restricts to hero shots; `sort=time`
+orders chronologically instead of by rank.
 
 ## Robustness
 
@@ -303,9 +461,9 @@ single value (`people`\|`stage`); `hero=1` restricts to hero shots.
   a stray `\r\n` to uploaded bodies (a leaked multipart separator) and break
   decoding. The server strips junk before the real image header, restoring the
   bytes *and* the sha1 — so the feature cache still hits.
-- **RAW is not supported.** CR3/ARW files are skipped as undecodable. Export JPEGs.
-
----
+- **Downloads are path-allowlisted** to the loaded run's tree, the same boundary
+  as image serving.
+- **RAW is not supported.** CR3/ARW files are skipped as undecodable.
 
 ## Project layout
 
@@ -333,8 +491,6 @@ tests/            smoke tests
 docs/             architecture and tuning notes
 ```
 
----
-
 ## Known limits
 
 - **One event's worth of training data.** The model has never been evaluated
@@ -344,6 +500,7 @@ docs/             architecture and tuning notes
   outputs are cached, so re-tuning costs nothing but a re-ingest.
 - **Cross-camera moments split.** Two photographers shooting the same gesture
   from different angles produce two bursts.
+- **Stars are global per run.** No per-user lists, and `Clear all` has no undo.
 - **Runs are never garbage-collected.** `RunDB.delete` exists but isn't wired to
   the UI, and a registry row whose folder was deleted by hand still shows in the
   dropdown.

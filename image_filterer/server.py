@@ -16,10 +16,13 @@ import io
 import json
 import mimetypes
 import re
+import secrets
 import shutil
 import socket
 import subprocess
 import threading
+import time
+import zipfile
 from datetime import datetime
 
 try:
@@ -27,7 +30,7 @@ try:
 except ImportError:  # pragma: no cover
     resource = None
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -67,6 +70,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         "emb_context": None,
         "text_encoder": None,
         "shot_types": None,
+        "captured": None,                # epoch seconds per ranked row (chronological sort)
         "stars": set(),                  # starred frame paths for the loaded run
         "stars_lock": threading.Lock(),
         "search_lock": threading.Lock(),
@@ -129,7 +133,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         state.update({
             "run_id": run_id, "run_dir": run_dir, "ranked": ranked, "bursts": bursts,
             "allowed_roots": roots, "emb": None, "emb_context": None,
-            "shot_types": None, "stars": _load_stars(run_dir),
+            "shot_types": None, "captured": None, "stars": _load_stars(run_dir),
         })
         # search index (row-aligned) if present
         npy = run_dir / "search_index.npy"
@@ -178,6 +182,76 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         st = np.asarray(labels)
         state["shot_types"] = st
         return st
+
+    # ----------------------------- capture times (chronological sort)
+
+    def _capture_times() -> Optional[np.ndarray]:
+        """Epoch seconds per ``ranked`` row, or None if unobtainable.
+
+        Capture time isn't a column in older runs — EXIF is read during burst
+        clustering and then discarded — so this backfills it and caches the
+        result beside the run. Reading DateTimeOriginal costs ~0.3 ms/frame, so
+        a full 3,000-frame backfill is about a second, once.
+        """
+        if state["captured"] is not None:
+            return state["captured"]
+        ranked = state["ranked"]
+        if ranked is None:
+            return None
+        run_dir = state["run_dir"]
+        arr: Optional[np.ndarray] = None
+
+        if "captured_at" in ranked.columns:      # written by newer ingests
+            ts = pd.to_datetime(ranked["captured_at"], errors="coerce")
+            if ts.notna().any():
+                arr = ts.map(lambda x: x.timestamp() if pd.notna(x) else np.nan) \
+                        .to_numpy(dtype=np.float64)
+
+        side = (Path(run_dir) / "captured_at.json") if run_dir else None
+        if arr is None and side is not None and side.exists():
+            try:
+                cached = json.loads(side.read_text())
+                arr = np.array([float(cached[str(p)]) if cached.get(str(p)) is not None else np.nan
+                                for p in ranked["path"]], dtype=np.float64)
+            except Exception:  # noqa: BLE001 — a bad sidecar just forces a re-read
+                arr = None
+
+        if arr is None:
+            from .bursts import read_frame_meta
+            vals: List[float] = []
+            for p in ranked["path"]:
+                meta = read_frame_meta(Path(p))
+                if meta is not None:
+                    vals.append(meta.captured_at.timestamp())
+                    continue
+                try:    # no EXIF timestamp — mtime is a serviceable stand-in
+                    vals.append(Path(p).stat().st_mtime)
+                except OSError:
+                    vals.append(float("nan"))
+            arr = np.array(vals, dtype=np.float64)
+            if side is not None:
+                try:
+                    side.write_text(json.dumps({
+                        str(p): (None if np.isnan(v) else v)
+                        for p, v in zip(ranked["path"], arr)}))
+                except OSError:
+                    pass
+        state["captured"] = arr
+        return arr
+
+    def _burst_min_times() -> Dict[int, float]:
+        """burst_id → capture time of its earliest frame."""
+        ct = _capture_times()
+        ranked = state["ranked"]
+        if ct is None or ranked is None:
+            return {}
+        s = pd.Series(ct, index=ranked.index).groupby(ranked["burst_id"]).min()
+        return {int(b): float(v) for b, v in s.items()}
+
+    def _iso(ts: float) -> str:
+        if ts is None or (isinstance(ts, float) and np.isnan(ts)):
+            return ""
+        return datetime.fromtimestamp(ts).isoformat(sep=" ", timespec="seconds")
 
     def _burst_rep_shot_map() -> Dict[int, str]:
         st = _ensure_shot_types()
@@ -432,7 +506,17 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
             df = df[df["is_hero"].astype(bool)]
 
         total = len(df)
-        df = df.sort_values("burst_rank").iloc[offset:offset + limit]
+        # sort=time orders bursts by when they were shot rather than by score.
+        # Bursts stay collapsed either way — this only changes their order.
+        tmin: Dict[int, float] = {}
+        if request.args.get("sort") == "time":
+            tmin = _burst_min_times()
+        if tmin:
+            df = df.assign(_t=df["burst_id"].map(lambda b: tmin.get(int(b), float("nan"))))
+            df = df.sort_values(["_t", "burst_rank"], na_position="last")
+        else:
+            df = df.sort_values("burst_rank")
+        df = df.iloc[offset:offset + limit]
         star_counts = _starred_counts()
         out: List[Dict[str, object]] = []
         for _, r in df.iterrows():
@@ -449,6 +533,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
                 "score_s12_after_hard": float(r.get("score_s12_after_hard", 0.0)),
                 "starred": str(r["path"]) in state["stars"],
                 "n_starred": int(star_counts.get(int(r["burst_id"]), 0)),
+                "captured_at": _iso(tmin.get(int(r["burst_id"]))) if tmin else "",
             })
         return jsonify({"bursts": out, "stats": _run_stats(),
                         "page": {"offset": offset, "limit": limit, "total_matching": int(total)}})
@@ -480,6 +565,18 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
             count = len(state["stars"])
         return jsonify({"ok": True, "path": path, "starred": want, "count": count})
 
+    @app.route("/api/stars/clear", methods=["POST"])
+    def api_stars_clear():
+        """Unstar everything in the loaded run. Stars are shared, so the UI
+        confirms first — this can discard a colleague's picks, not just yours."""
+        if state["ranked"] is None:
+            return jsonify({"error": "No run selected."}), 400
+        with state["stars_lock"]:
+            cleared = len(state["stars"])
+            state["stars"].clear()
+            _save_stars()
+        return jsonify({"ok": True, "cleared": cleared, "count": 0})
+
     @app.route("/api/starred")
     def api_starred():
         """The saved-for-later list: one entry per starred FRAME, not per burst.
@@ -509,7 +606,12 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
 
         total = int(len(sub))
         sizes = ranked.groupby("burst_id").size()
-        sub = sub.sort_values(["burst_rank", "within_burst_rank"]).iloc[offset:offset + limit]
+        ct = _capture_times() if request.args.get("sort") == "time" else None
+        if ct is not None and len(sub):
+            sub = sub.assign(_t=ct[sub.index]).sort_values("_t", na_position="last")
+        else:
+            sub = sub.sort_values(["burst_rank", "within_burst_rank"])
+        sub = sub.iloc[offset:offset + limit]
         out: List[Dict[str, object]] = []
         for _, r in sub.iterrows():
             bid = int(r["burst_id"])
@@ -526,6 +628,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
                 "score_s12_after_hard": float(r.get("score_s12_after_hard", 0.0)),
                 "starred": True,
                 "n_starred": 1,
+                "captured_at": _iso(float(r["_t"])) if "_t" in sub.columns else "",
                 "match_within_burst_rank": int(r.get("within_burst_rank", 1)),
             })
         return jsonify({"bursts": out, "stats": _run_stats(),
@@ -653,6 +756,158 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         mime, _ = mimetypes.guess_type(str(real))
         resp = send_file(str(real), mimetype=mime or "image/jpeg", conditional=True, max_age=604800)
         resp.headers["Cache-Control"] = _CACHE_HDR
+        return resp
+
+    # ----------------------------- downloads
+    #
+    # Every download hands back the ORIGINAL file, not a preview — the point of
+    # the tool is producing deliverables. Bulk selections are zipped and streamed
+    # rather than buffered: "download all starred" on a real shoot is routinely
+    # several GB, which would blow up the process if assembled in memory.
+
+    _dl_tokens: Dict[str, Dict[str, object]] = {}
+    _dl_lock = threading.Lock()
+    _DL_TTL = 3600.0          # seconds a prepared selection stays valid
+
+    def _zip_arcnames(paths: Sequence[str]) -> List[str]:
+        """Flat, collision-free names inside the archive.
+
+        Frames from different subfolders can share a basename, and a zip with
+        duplicate entries silently loses files on extraction.
+        """
+        used: Set[str] = set()
+        out: List[str] = []
+        for p in paths:
+            name = Path(p).name
+            if name in used:
+                stem, dot, ext = name.rpartition(".")
+                base, suffix = (stem, f".{ext}") if dot else (name, "")
+                i = 2
+                while f"{base}_{i}{suffix}" in used:
+                    i += 1
+                name = f"{base}_{i}{suffix}"
+            used.add(name)
+            out.append(name)
+        return out
+
+    def _prune_tokens() -> None:
+        now = time.time()
+        for t in [t for t, v in _dl_tokens.items() if float(v["expires"]) < now]:
+            _dl_tokens.pop(t, None)
+
+    @app.route("/download")
+    def download_one():
+        """One original file, as an attachment. Same allowlist as /img."""
+        real = _check_allowed(request.args.get("path", ""))
+        return send_file(str(real), as_attachment=True, download_name=real.name,
+                         mimetype=mimetypes.guess_type(str(real))[0] or "image/jpeg")
+
+    @app.route("/api/download/prepare", methods=["POST"])
+    def api_download_prepare():
+        """Validate a selection and reserve a token for it.
+
+        Two steps rather than one because the browser must *navigate* to the zip
+        for a native streaming download — it can't stream the response of a POST
+        without buffering the whole archive in JS memory first.
+
+        Body: ``{"scope": "starred"}`` or ``{"paths": [...]}``.
+        """
+        if state["ranked"] is None:
+            return jsonify({"error": "No run selected."}), 400
+        data = request.get_json(silent=True) or {}
+        if str(data.get("scope", "")) == "starred":
+            wanted = sorted(state["stars"])
+        else:
+            wanted = [str(p) for p in (data.get("paths") or [])]
+
+        known = set(state["ranked"]["path"].astype(str))
+        seen: Set[str] = set()
+        paths: List[str] = []
+        missing = 0
+        for p in wanted:
+            if p in seen or p not in known:      # same trust boundary as /img
+                continue
+            seen.add(p)
+            if Path(p).is_file():
+                paths.append(p)
+            else:
+                missing += 1
+        if not paths:
+            return jsonify({"error": "Nothing available to download."}), 400
+
+        total = sum(Path(p).stat().st_size for p in paths)
+        row = db.get(int(state["run_id"])) if state["run_id"] is not None else None
+        label = _safe_name(row["name"]) if row else "run"
+        kind = "starred" if str(data.get("scope", "")) == "starred" else "selection"
+        token = secrets.token_urlsafe(18)
+        with _dl_lock:
+            _prune_tokens()
+            _dl_tokens[token] = {"paths": paths, "filename": f"{label}_{kind}.zip",
+                                 "expires": time.time() + _DL_TTL}
+        return jsonify({"ok": True, "token": token, "count": len(paths),
+                        "bytes": int(total), "missing": missing,
+                        "filename": f"{label}_{kind}.zip"})
+
+    @app.route("/api/download/zip")
+    def api_download_zip():
+        """Stream a prepared selection as a zip.
+
+        Entries are STORED, not deflated: JPEGs are already compressed, so
+        deflate costs real CPU per file for roughly nothing, and stored entries
+        let the archive stream out at disk speed.
+        """
+        token = request.args.get("token", "")
+        with _dl_lock:
+            _prune_tokens()
+            entry = _dl_tokens.get(token)
+        if entry is None:
+            abort(404)
+        paths: List[str] = list(entry["paths"])  # type: ignore[arg-type]
+        names = _zip_arcnames(paths)
+
+        class _Funnel:
+            """Collects zipfile's writes so the view can yield them onward."""
+            def __init__(self) -> None:
+                self.buf = bytearray()
+
+            def write(self, b: bytes) -> int:
+                self.buf += b
+                return len(b)
+
+            def flush(self) -> None:
+                pass
+
+            def drain(self) -> bytes:
+                out = bytes(self.buf)
+                del self.buf[:]
+                return out
+
+        def generate():
+            funnel = _Funnel()
+            # zipfile writes data descriptors when the stream isn't seekable,
+            # which is exactly what lets this be a generator.
+            with zipfile.ZipFile(funnel, "w", zipfile.ZIP_STORED, allowZip64=True) as zf:
+                for path, arc in zip(paths, names):
+                    try:
+                        with open(path, "rb") as src, zf.open(arc, "w") as dst:
+                            while True:
+                                chunk = src.read(1 << 20)
+                                if not chunk:
+                                    break
+                                dst.write(chunk)
+                                out = funnel.drain()
+                                if out:
+                                    yield out
+                    except OSError:
+                        continue  # a file vanished mid-download; skip it
+                    out = funnel.drain()
+                    if out:
+                        yield out
+            yield funnel.drain()  # central directory
+
+        resp = Response(generate(), mimetype="application/zip")
+        resp.headers["Content-Disposition"] = f'attachment; filename="{entry["filename"]}"'
+        resp.headers["Cache-Control"] = "no-store"
         return resp
 
     _thumb_cache: Dict[Tuple[str, int], bytes] = {}
