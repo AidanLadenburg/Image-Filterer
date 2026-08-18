@@ -3,13 +3,13 @@
 
 > ### ⚠️ This is an alpha
 >
-> **The ranking will make mistakes.** It learned from one labeled shoot, about
+> **The ranking will make mistakes.** It learned from a few labeled shoots, about
 > 2,600 photos and it has never been tested against a different event. Please don't
 > trust the rankings over your own intuition, or assume the best results will always
 > be at the very top
 >
 > **The feature list is not final.** Everything below can change. If something
-> doesn't work, works badly, or is missing, that's useful information please
+> doesn't work, works badly, or is missing, that's useful information, please
 > say so. Right now I am mostly adding features to see what sticks. Eventually
 > slimming the system down is a priority
 >
@@ -26,7 +26,7 @@
 | **Browse by time** | Switch the **Sort** dropdown to *Chronological* to walk the event start to finish. |
 | **Search in plain English** | Type "person at a podium", "robot on stage", "wide shot of the crowd". No tags or keywords needed. |
 | **Filter** | By framing (wide / medium / close), by subject (people / stage), or to solo hero shots only. |
-| **Open a moment** | Click a tile to see every frame in that burst, ordered best-first, and step through with ← / →. |
+| **Open a moment** | Click a tile to see every frame in that burst, ordered best-first or chronilogical, and step through with ← / →. |
 | **Star the ones you want** | Click ☆ on any tile or frame. Stars are saved and shared with everyone looking at the same shoot. |
 | **Download** | One photo, your starred set, or a hand-picked selection using select mode |
 | **Quality slider** | Hide everything below a chosen band so only the strongest photos remain. |
@@ -145,12 +145,7 @@ main subject.
 **Quality slider** — "top 25%" means the strongest quarter of the shoot by the
 system's own ranking, not a measure of sharpness or exposure. It hides weaker
 frames *inside* bursts too, so a burst of 61 can show its best 3. The header
-always says what survived — `159/733 moments · 332/3316 photos` — and a burst
-never empties completely; its best frame always stays.
-
-**The slider never hides a starred frame.** ★ Starred always shows everything
-you or the team picked, however low the model scored it — the other filters still
-apply there.
+always says what survived — `159/733 moments · 332/3316 photos`.
 
 **Relevance** — only appears when you search. How well that photo matches the
 words you typed. Search results are ordered by this instead of by rank.
