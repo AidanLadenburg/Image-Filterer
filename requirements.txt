@@ -14,6 +14,10 @@ open_clip_torch>=2.24
 mediapipe>=0.10
 ultralytics>=8.2
 tqdm>=4.65
+rawpy>=0.18
 
-# Optional: Sony lens-model EXIF reads for finer burst clustering.
+# pyexiv2 is REQUIRED, not optional: RAW files carry DateTimeOriginal only in the
+# container (their embedded preview doesn't have it), so without this every RAW
+# frame silently becomes its own single-frame burst. It also supplies the Sony
+# lens model that PIL won't surface.
 pyexiv2>=2.8

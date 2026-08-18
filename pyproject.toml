@@ -20,13 +20,11 @@ dependencies = [
     "mediapipe>=0.10",          # eyelid / mouth landmarks
     "ultralytics>=8.2",         # YOLOv8-pose person detection
     "tqdm>=4.65",
+    "rawpy>=0.18",              # RAW (CR3/ARW/NEF…) via the embedded JPEG preview
+    "pyexiv2>=2.8",             # EXIF that PIL won't surface: RAW timestamps, Sony lens model
 ]
 
 [project.optional-dependencies]
-# pyexiv2 reaches into Sony maker notes for the lens model, which PIL doesn't
-# surface. Without it, Sony bodies fall back to Make/Model for camera identity —
-# burst clustering still works, just slightly coarser on multi-Sony shoots.
-exif = ["pyexiv2>=2.8"]
 # Alternate context encoders (DINOv2, C-RADIO). Not needed for the default.
 encoders = ["transformers>=4.40"]
 dev = ["pytest>=7.4"]

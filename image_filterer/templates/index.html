@@ -8,7 +8,8 @@
   :root {
     --bg: #0e0f12; --panel: #16181e; --border: #262a33; --text: #e6e8ee;
     --text-dim: #9aa0ad; --accent: #78aaff; --accent2: #b57edc; --good: #3ecf8e;
-    --star: #f0c96b;
+    --star: #f0c96b;          /* your stars */
+    --star-other: #6fb2f0;    /* someone else's */
     --tile-min: 220px;   /* grid tile floor at 100% zoom; set by the size control */
   }
   * { box-sizing: border-box; }
@@ -41,6 +42,13 @@
   .pill.star-pill.active { background: var(--star); border-color: var(--star); color: #0e0f12; font-weight: 700; }
   .badge.hero { background: #4a3a12; color: #f0c96b; border: 1px solid #7a5f20; }
   .badge.starred { background: #4a3a12; color: var(--star); border: 1px solid #7a5f20; }
+  .badge.starred-other { background: #16283a; color: var(--star-other); border: 1px solid #2c4a68; }
+  .owner-seg { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+  .owner-seg button { cursor: pointer; background: #14161c; border: none; color: var(--text-dim);
+    padding: 5px 10px; font-size: 12px; }
+  .owner-seg button + button { border-left: 1px solid var(--border); }
+  .owner-seg button.active { background: var(--star); color: #0e0f12; font-weight: 700; }
+  .owner-seg button.active[data-owner="others"] { background: var(--star-other); }
   .shot-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; }
   .ctl { display: inline-flex; align-items: center; gap: 5px; }
   .ctl .zbtn { cursor: pointer; background: #1d212a; border: 1px solid var(--border); border-radius: 6px;
@@ -69,15 +77,22 @@
   #progress-msg { margin-top: 6px; font-size: 12px; color: var(--text-dim); }
   #progress-msg.error { color: #ff8080; }
 
-  /* global ingest bar — visible to ALL users while any ingestion runs */
-  #global-ingest { display: none; position: sticky; top: 0; z-index: 25;
+  /* activity bar — processing progress AND the reload prompt, in that order */
+  #activity-bar { display: none; position: sticky; top: 0; z-index: 25;
     background: #14202e; border-bottom: 1px solid #2b4a63; }
-  #global-ingest .gi-bar { height: 4px; background: #0c141c; }
-  #global-ingest .gi-fill { height: 100%; width: 0%; background: linear-gradient(90deg,var(--accent),var(--accent2)); transition: width .4s ease; }
-  #global-ingest .gi-row { display: flex; align-items: center; gap: 12px; padding: 8px 16px; }
-  #global-ingest .gi-msg { font-size: 13px; color: #cfe3f5; }
-  #global-ingest .gi-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+  #activity-bar.show { display: block; }
+  #activity-bar.done { background: #16281c; border-bottom-color: #2f5a3b; }
+  #activity-bar .ab-track { height: 4px; background: #0c141c; }
+  #activity-bar .ab-fill { height: 100%; width: 0%;
+    background: linear-gradient(90deg,var(--accent),var(--accent2)); transition: width .4s ease; }
+  #activity-bar.done .ab-fill { background: var(--good); }
+  #activity-bar .ab-row { display: flex; align-items: center; gap: 10px; padding: 8px 16px; }
+  #activity-bar .ab-msg { font-size: 13px; color: #cfe3f5; }
+  #activity-bar.done .ab-msg { color: #cfe9d7; }
+  #activity-bar .ab-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
     display: inline-block; margin-right: 8px; animation: pulse 1.2s ease-in-out infinite; }
+  #activity-bar.done .ab-dot { background: var(--good); animation: none; }
+  #ab-reload:disabled { opacity: .45; cursor: default; }
   @keyframes pulse { 0%,100% { opacity: .35; } 50% { opacity: 1; } }
 
   main { padding: 16px; }
@@ -99,6 +114,7 @@
   .tile:hover .star-btn, .star-btn:focus-visible { opacity: 1; }
   .star-btn:hover { transform: scale(1.12); color: var(--star); }
   .star-btn.on { opacity: 1; color: var(--star); border-color: #7a5f20; background: rgba(74,58,18,.8); }
+  .star-btn.other { opacity: 1; color: var(--star-other); border-color: #2c4a68; background: rgba(20,38,58,.8); }
   .star-btn.busy { opacity: .5; pointer-events: none; }
   .meta { padding: 8px 10px; }
   .row1 { display: flex; gap: 6px; align-items: center; margin-bottom: 5px; }
@@ -157,6 +173,10 @@
   .modal-nav.prev { left: 6px; } .modal-nav.next { right: 6px; }
   .modal-nav.disabled { opacity: .25; pointer-events: none; }
   .sidebar { width: 300px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
+  .strip-head { display: flex; align-items: center; gap: 8px; font-size: 11px;
+    color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em;
+    border-top: 1px solid var(--border); padding-top: 8px; }
+  .strip-head .btn { margin-left: auto; padding: 2px 8px; font-size: 12px; line-height: 1.4; }
   .frame-strip { display: flex; flex-direction: column; gap: 6px; overflow-y: auto; }
   .frame-row { display: flex; gap: 8px; padding: 5px; border: 1px solid transparent; border-radius: 8px; cursor: pointer; }
   .frame-row:hover { background: #1b1e25; }
@@ -171,6 +191,7 @@
     cursor: pointer; color: #4d5462; font-size: 15px; padding: 2px 3px; line-height: 1; }
   .frame-row .star-mini:hover { color: var(--star); }
   .frame-row .star-mini.on { color: var(--star); }
+  .frame-row .star-mini.other { color: var(--star-other); }
   .frame-row .dl-mini { background: none; border: none; cursor: pointer; color: #4d5462;
     font-size: 13px; padding: 2px 3px; line-height: 1; }
   .frame-row .dl-mini:hover { color: var(--accent); }
@@ -186,6 +207,7 @@
 <header>
   <span class="title">hero-shot <span class="v">browser</span></span>
   <select id="run-select" title="Select an ingested run"></select>
+  <button class="btn" id="delete-run" title="Delete this shoot" style="padding:5px 9px">🗑</button>
   <span class="stats" id="stats"></span>
   <span class="search-box">
     <input id="search-input" type="search" placeholder="Search…  e.g. “person on stage”" autocomplete="off" spellcheck="false" />
@@ -217,14 +239,20 @@
     <select id="zoom-select" aria-label="Thumbnail size"></select>
     <button class="zbtn" id="zoom-in" aria-label="Bigger thumbnails">+</button>
   </div>
+  <span id="hf-chip" title="A folder is being watched — new photos are ingested automatically">
+    <span class="hf-dot"></span><span id="hf-text">watching</span>
+  </span>
   <button class="btn primary" id="btn-upload">＋ Upload folder</button>
 </header>
 
-<div id="global-ingest">
-  <div class="gi-bar"><div class="gi-fill" id="gi-fill"></div></div>
-  <div class="gi-row">
-    <span class="gi-msg" id="gi-msg"><span class="gi-dot"></span>Ingesting…</span>
-    <button class="btn" id="gi-cancel" style="margin-left:auto">Cancel ingestion</button>
+<!-- One bar for the whole lifecycle: appears the moment work starts, tracks it,
+     then turns into the reload prompt once the new photos are live. -->
+<div id="activity-bar">
+  <div class="ab-track"><div class="ab-fill" id="ab-fill"></div></div>
+  <div class="ab-row">
+    <span class="ab-msg" id="ab-msg"><span class="ab-dot"></span>Working…</span>
+    <button class="btn" id="ab-cancel" style="margin-left:auto">Cancel</button>
+    <button class="btn primary" id="ab-reload" disabled>Reload</button>
   </div>
 </div>
 
@@ -241,9 +269,14 @@
     <button class="btn primary" id="ingest-btn" disabled>Upload &amp; ingest</button>
   </div>
   <div class="row" style="margin-top:8px">
-    <b style="font-size:12px;color:var(--text-dim);width:130px">Folder on server</b>
-    <input id="server-path-input" type="text" placeholder="/path/to/folder on the compute machine (no upload — fastest)" style="flex:1;min-width:280px" />
-    <button class="btn primary" id="ingest-path-btn">Ingest server path</button>
+    <b style="font-size:12px;color:var(--text-dim);width:130px">Watch a folder</b>
+    <input id="hf-path-input" type="text" placeholder="/path/to/shared folder — new photos are ingested as they land" style="flex:1;min-width:280px" />
+    <button class="btn primary" id="hf-start-btn">Start watching</button>
+    <button class="btn" id="hf-stop-btn" style="display:none">Stop watching</button>
+  </div>
+  <div class="row" style="margin-top:4px">
+    <span style="width:130px"></span>
+    <span id="hf-status" style="font-size:12px;color:var(--text-dim)"></span>
   </div>
   <div class="progress-wrap" id="progress-wrap">
     <div class="progress-bar"><div class="fill" id="progress-fill"></div></div>
@@ -260,6 +293,11 @@
     <button class="btn dl-primary" id="dl-action">⬇ Download</button>
     <button class="btn" id="sel-all" style="display:none">Select all loaded</button>
     <button class="btn" id="sel-clear" style="display:none">Clear</button>
+    <span class="owner-seg" id="owner-seg" style="display:none">
+      <button data-owner="all" class="active">All</button>
+      <button data-owner="mine">Mine</button>
+      <button data-owner="others">Others</button>
+    </span>
     <button class="btn" id="clear-starred" style="display:none">☆ Clear starred</button>
     <span class="ab-note" id="ab-note"></span>
   </div>
@@ -285,6 +323,10 @@
       </div>
       <div class="sidebar">
         <div id="modal-meta"></div>
+        <div class="strip-head">
+          <span id="strip-label">Best first</span>
+          <button class="btn" id="strip-toggle" title="Swap the order of frames in this burst">⇄</button>
+        </div>
         <div class="frame-strip" id="frame-strip"></div>
       </div>
     </div>
@@ -299,11 +341,22 @@ const state = {
   bursts: [], shots: new Set(), subject: "", hero: false, query: "", offset: 0, total: 0,
   loading: false, openBurst: null, openIndex: -1, searchError: null, hasRun: false,
   starredOnly: false,      // the "★ Starred" view toggle
-  stars: new Set(),        // starred frame paths, mirrored from the server
+  // No accounts here, so "you" is a random id kept in this browser. It is only
+  // ever used to tell your stars apart from everyone else's.
+  viewer: null,
+  starsMine: new Set(),    // starred by you
+  starsOthers: new Set(),  // starred by anyone else
+  starOwner: "all",        // starred view: all | mine | others
   openFrame: null,         // frame shown in the modal — target of the S shortcut
   selectMode: false,       // click selects instead of opening
   selected: new Set(),     // frame paths chosen for a bulk download
   sort: "rank",            // "rank" (best first) | "time" (chronological)
+  burstOrder: "rank",      // ordering inside the open burst; defaults to `sort`
+  burstFrames: [],         // frames of the open burst, re-sorted client-side
+  runId: null,             // THIS viewer's shoot — no longer shared server state
+  version: null,           // data generation this view was built from
+  pending: null,           // {version, n_frames} seen by the poller but not loaded
+  lastFrames: null,        // frame count this view was built from
 };
 const imgUrl = p => "/img?path=" + encodeURIComponent(p);
 const thumbUrl = (p, w) => "/thumb?path=" + encodeURIComponent(p) + "&w=" + (w || 320);
@@ -349,6 +402,13 @@ const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">
 function buildQuery(offset, limit) {
   const p = new URLSearchParams();
   p.set("offset", offset); p.set("limit", limit);
+  if (state.runId) p.set("run_id", state.runId);
+  if (state.viewer) p.set("viewer", state.viewer);
+  if (state.starredOnly && state.starOwner !== "all") p.set("owner", state.starOwner);
+  // Paginating is only coherent within one generation of the data. Sending the
+  // version we started from lets the server refuse rather than hand back a page
+  // computed against a reshuffled ordering.
+  if (offset > 0 && state.version != null) p.set("version", state.version);
   if (state.shots.size) p.set("shot", [...state.shots].join(","));
   if (state.subject) p.set("subject", state.subject);
   if (state.hero) p.set("hero", "1");
@@ -384,7 +444,8 @@ async function downloadMany(body, btn) {
   try {
     const res = await fetch("/api/download/prepare", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...body, run_id: state.runId, viewer: state.viewer,
+                             owner: state.starOwner }),
     });
     const d = await res.json();
     if (!res.ok) { alert(d.error || "Could not prepare the download."); return; }
@@ -416,10 +477,14 @@ function updateActionBar() {
   const selecting = state.selectMode, starred = state.starredOnly && !state.query;
   $("#sel-all").style.display = selecting ? "" : "none";
   $("#sel-clear").style.display = selecting ? "" : "none";
-  const cs = $("#clear-starred");
+  const cs = $("#clear-starred"), seg = $("#owner-seg");
+  seg.style.display = (!selecting && starred) ? "" : "none";
+  // Always yours only, whichever tab is showing — there is no way to bulk-delete
+  // someone else's picks.
+  const nMine = state.starsMine.size;
   cs.style.display = (!selecting && starred) ? "" : "none";
-  cs.disabled = !state.stars.size;
-  cs.textContent = state.stars.size ? `☆ Clear all ${state.stars.size}` : "☆ Clear starred";
+  cs.disabled = !nMine;
+  cs.textContent = nMine ? `☆ Clear my ${nMine}` : "☆ Clear my stars";
   if (selecting) {
     const n = state.selected.size;
     btn.textContent = n ? `⬇ Download ${n} selected` : "⬇ Download selected";
@@ -427,8 +492,11 @@ function updateActionBar() {
     note.textContent = n ? "Full-resolution originals, as a .zip" : "Click tiles to select them.";
     bar.classList.add("show");
   } else if (starred) {
-    const n = state.stars.size;
-    btn.textContent = `⬇ Download all ${n} starred`;
+    const n = state.starOwner === "mine" ? state.starsMine.size
+            : state.starOwner === "others" ? [...state.starsOthers].filter(p => !isMine(p)).length
+            : nStarredTotal();
+    const label = state.starOwner === "mine" ? "your" : state.starOwner === "others" ? "their" : "all";
+    btn.textContent = `⬇ Download ${label} ${n} starred`;
     btn.disabled = !n;
     note.textContent = n ? "Full-resolution originals, as a .zip" : "";
     bar.classList.toggle("show", state.hasRun);
@@ -440,23 +508,30 @@ function updateActionBar() {
 // ---- stars ----
 async function refreshStars() {
   try {
-    const d = await (await fetch("/api/stars")).json();
-    state.stars = new Set(d.starred || []);
-  } catch (e) { state.stars = new Set(); }
+    const d = await (await fetch(`/api/stars?run_id=${state.runId || ""}&viewer=${state.viewer}`)).json();
+    state.starsMine = new Set(d.mine || []);
+    state.starsOthers = new Set(d.others || []);
+  } catch (e) { state.starsMine = new Set(); state.starsOthers = new Set(); }
 }
-function isStarred(path) { return state.stars.has(path); }
+const nStarredTotal = () =>
+  state.starsMine.size + [...state.starsOthers].filter(p => !state.starsMine.has(p)).length;
+const isMine   = p => state.starsMine.has(p);
+const isOthers = p => state.starsOthers.has(p);
+function isStarred(path) { return isMine(path) || isOthers(path); }
 
 /** Persist one frame's star state, then repaint every control bound to it. */
 async function toggleStar(path, btn) {
-  const want = !isStarred(path);
+  // Toggles YOUR star. A frame someone else starred is still un-starred for
+  // them; your click adds yours alongside theirs.
+  const want = !isMine(path);
   if (btn) btn.classList.add("busy");
   try {
     const res = await fetch("/api/star", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path, starred: want }),
+      body: JSON.stringify({ path, starred: want, run_id: state.runId, viewer: state.viewer }),
     });
     if (!res.ok) return;
-    if (want) state.stars.add(path); else state.stars.delete(path);
+    if (want) state.starsMine.add(path); else state.starsMine.delete(path);
     paintStars();
     // Leaving the starred view is what the user means by un-starring there, so
     // drop the tile rather than leaving a hollow star behind.
@@ -464,17 +539,22 @@ async function toggleStar(path, btn) {
   } finally { if (btn) btn.classList.remove("busy"); }
 }
 
-/** Re-sync every star control on screen with state.stars. */
+/** Re-sync every star control on screen with the mine/others sets. */
 function paintStars() {
   $$("[data-star-path]").forEach(el => {
-    el.classList.toggle("on", isStarred(el.dataset.starPath));
+    const p = el.dataset.starPath, mine = isMine(p), other = isOthers(p);
+    el.classList.toggle("on", mine);            // gold  = yours
+    el.classList.toggle("other", !mine && other); // blue = someone else's
     if (el.id === "modal-star") {
-      el.textContent = isStarred(el.dataset.starPath) ? "★ Starred" : "☆ Star this frame";
+      el.textContent = mine ? "★ Starred by you"
+                    : other ? "☆ Star this too (starred by someone else)"
+                            : "☆ Star this frame";
     } else {
-      el.textContent = isStarred(el.dataset.starPath) ? "★" : "☆";
+      el.textContent = (mine || other) ? "★" : "☆";
+      el.title = mine ? "Starred by you" : other ? "Starred by someone else" : "Star this frame";
     }
   });
-  const n = state.stars.size;
+  const n = state.starsMine.size + [...state.starsOthers].filter(p => !isMine(p)).length;
   const pill = $("#star-pill");
   if (pill) pill.textContent = n ? `★ Starred (${n})` : "★ Starred";
   updateActionBar();
@@ -488,6 +568,7 @@ function renderTiles(bursts, append) {
     tile.className = "tile";
     // Other frames of this burst that are starred but aren't the one on show.
     const others = (b.n_starred || 0) - (isStarred(b.rep_path) ? 1 : 0);
+    const otherStar = !isMine(b.rep_path) && isOthers(b.rep_path);
     tile.innerHTML = `
       <div class="img-wrap">
         <img loading="lazy" data-path="${esc(b.rep_path)}" src="${thumbUrl(b.rep_path, thumbBucket(zoomPct))}" />
@@ -505,6 +586,7 @@ function renderTiles(bursts, append) {
         <div class="filename" title="${esc(b.rep_filename)}">${esc(b.rep_filename)}</div>
         <div class="badges">
           <span class="badge">${b.burst_size} frame${b.burst_size===1?"":"s"}</span>
+          ${otherStar ? '<span class="badge starred-other" title="starred by someone else">★ theirs</span>' : ""}
           ${others > 0 ? `<span class="badge starred" title="starred frames elsewhere in this burst">★ ${others} more</span>` : ""}
           ${b.is_hero ? '<span class="badge hero">hero</span>' : ""}
           ${b.shot_type ? `<span class="badge shot-${b.shot_type}">${b.shot_type}</span>` : ""}
@@ -532,8 +614,14 @@ function updateBar() {
   const unit = (state.starredOnly && !state.query) ? "starred frames" : "bursts";
   $("#progress-count").textContent = `${seen} / ${total} ${unit}`;
   const btn = $("#load-more");
-  btn.disabled = state.loading || seen >= total;
-  btn.textContent = state.loading ? "Loading…" : (seen >= total ? "All loaded" : "Load more");
+  if (state.pending) {
+    // Paging further would mix two orderings, so reloading is the only safe move.
+    btn.disabled = false;
+    btn.textContent = "Reload to see more";
+  } else {
+    btn.disabled = state.loading || seen >= total;
+    btn.textContent = state.loading ? "Loading…" : (seen >= total ? "All loaded" : "Load more");
+  }
   const emptyEl = $("#empty");
   if (!state.hasRun) {
     emptyEl.querySelector(".big").textContent = "No run selected";
@@ -547,8 +635,9 @@ function updateBar() {
     if (state.searchError) big = state.searchError;
     else if (state.query) big = `No matches for “${state.query}”`;
     else if (state.starredOnly) {
-      big = state.stars.size ? "No starred frames match these filters" : "Nothing starred yet";
-      sub = state.stars.size ? "" : "Hover a tile and click ☆, or press S while viewing a frame.";
+      const any = nStarredTotal();
+      big = any ? "No starred frames match these filters" : "Nothing starred yet";
+      sub = any ? "" : "Hover a tile and click ☆, or press S while viewing a frame.";
     } else big = "No images in this run";
     emptyEl.querySelector(".big").textContent = big;
     emptyEl.querySelector("div:last-child").textContent = sub;
@@ -568,6 +657,15 @@ async function loadPage(reset) {
     const offset = reset ? 0 : state.offset;
     const res = await fetch(buildQuery(offset, PAGE));
     const data = await res.json();
+    if (data.stale) {
+      // New photos landed mid-browse. Keep what's on screen and make the reload
+      // explicit rather than silently serving a page from a different ordering.
+      state.pending = { version: data.version, n_frames: data.stats && data.stats.n_frames };
+      updateReloadBar();
+      return;
+    }
+    if (data.version != null) state.version = data.version;
+    state.pending = null;
     state.searchError = data.error || null;
     if (reset) { state.bursts = []; $("#grid").innerHTML = ""; }
     state.bursts = state.bursts.concat(data.bursts);
@@ -576,9 +674,10 @@ async function loadPage(reset) {
     renderTiles(data.bursts, !reset);
     if (data.stats) {
       // Stars are shared server state, so another viewer's change shows up here.
-      if (typeof data.stats.n_starred === "number" && data.stats.n_starred !== state.stars.size) {
+      if (typeof data.stats.n_starred === "number" && data.stats.n_starred !== nStarredTotal()) {
         await refreshStars();
       }
+      state.lastFrames = data.stats.n_frames;
       $("#stats").innerHTML = state.query
         ? `<b>${state.total}</b> matches`
         : state.starredOnly
@@ -592,19 +691,39 @@ async function loadPage(reset) {
 async function openModal(burst) {
   state.openBurst = burst;
   state.openIndex = state.bursts.indexOf(burst);
+  // Default to the ordering the grid is using: in chronological mode a burst
+  // read best-first no longer matches the sequence it was shot in.
+  state.burstOrder = state.sort;
   $("#modal-title").textContent = `burst #${burst.burst_rank} — ${burst.burst_size} frame${burst.burst_size===1?"":"s"}`;
   $("#modal-bg").classList.add("open");
-  const data = await (await fetch(`/api/burst/${burst.burst_id}`)).json();
+  const data = await (await fetch(
+    `/api/burst/${burst.burst_id}?run_id=${state.runId || ""}&sort=${state.sort}` +
+    `&viewer=${state.viewer}`)).json();
+  state.burstFrames = data.frames || [];
+  renderStrip(burst);
+  updateNav();
+}
+
+/** (Re)build the frame strip in the current burst order. */
+function renderStrip(burst, keepPath) {
+  const frames = [...(state.burstFrames || [])];
+  const byTime = state.burstOrder === "time" && frames.some(f => f.captured_at);
+  frames.sort(byTime
+    ? (a, b) => String(a.captured_at).localeCompare(String(b.captured_at))
+    : (a, b) => a.within_burst_rank - b.within_burst_rank);
+  $("#strip-label").textContent = byTime ? "Chronological" : "Best first";
+  $("#strip-toggle").disabled = !frames.some(f => f.captured_at);
+
   const strip = $("#frame-strip"); strip.innerHTML = "";
   const rows = [];
-  data.frames.forEach(f => {
+  frames.forEach(f => {
     const row = document.createElement("div");
     row.className = "frame-row" + (f.is_representative ? " representative" : "");
     row.innerHTML = `
       <img src="${thumbUrl(f.path,160)}" loading="lazy" />
       <div class="info">
         <div class="fn">${esc(f.filename)}</div>
-        <div class="sc">score ${f.score_s12_after_hard.toFixed(2)}${f.shot_type ? " · " + f.shot_type : ""}</div>
+        <div class="sc">${byTime && f.captured_at ? esc(f.captured_at.slice(11,19)) + " · " : ""}score ${f.score_s12_after_hard.toFixed(2)}${f.shot_type ? " · " + f.shot_type : ""}</div>
         ${f.tech_hard_reject ? `<div class="hard">REJ: ${esc(f.tech_hard_reject_reason || "hard")}</div>` : ""}
       </div>
       <span class="acts">
@@ -618,6 +737,7 @@ async function openModal(burst) {
     dm.addEventListener("click", e => { e.stopPropagation(); downloadOne(f.path, dm); });
     strip.appendChild(row); rows.push({ row, f });
   });
+
   function select(f, row) {
     rows.forEach(r => r.row.classList.remove("active"));
     row.classList.add("active");
@@ -625,7 +745,7 @@ async function openModal(burst) {
     // Preview at ~1600px (a few hundred KB) instead of the multi-MB original.
     $("#modal-img").src = thumbUrl(f.path, 1600);
     $("#modal-meta").innerHTML = `
-      <div style="font-size:12px;color:var(--text-dim)">${f.is_representative ? "representative · " : ""}within-burst #${f.within_burst_rank}</div>
+      <div style="font-size:12px;color:var(--text-dim)">${f.is_representative ? "representative · " : ""}within-burst #${f.within_burst_rank}${f.captured_at ? " · " + esc(f.captured_at.slice(11,19)) : ""}</div>
       <div style="font-family:ui-monospace,monospace;font-size:12px;line-height:1.7">
         hero score (s1):   ${f.score_s1.toFixed(3)}<br>
         + technical (s1+2): ${f.score_s12_after_hard.toFixed(3)}
@@ -640,13 +760,15 @@ async function openModal(burst) {
     $("#modal-dl").addEventListener("click", () => downloadOne(f.path, null));
     paintStars();
   }
-  // Open on the frame the tile was showing — for search hits and starred frames
-  // that's not the burst representative, and jumping elsewhere is disorienting.
-  const initial = rows.find(r => r.f.path === burst.rep_path)
+
+  // Keep looking at the same photo across a re-sort; otherwise open on the frame
+  // the tile showed, falling back to the burst representative.
+  const want = keepPath || burst.rep_path;
+  const initial = rows.find(r => r.f.path === want)
                || rows.find(r => r.f.is_representative) || rows[0];
   if (initial) select(initial.f, initial.row);
-  updateNav();
 }
+
 function closeModal() {
   $("#modal-bg").classList.remove("open");
   state.openBurst = null; state.openFrame = null;
@@ -665,6 +787,65 @@ function updateNav() {
   $("#modal-next").classList.toggle("disabled", state.openIndex >= state.bursts.length - 1 && state.bursts.length >= state.total);
 }
 
+// ---- activity + new-photo detection ----
+// One bar, three states: working (progress, Reload greyed) -> ready (Reload
+// live) -> hidden. The grid itself still never moves until Reload is clicked.
+function updateActivityBar() {
+  const bar = $("#activity-bar"), a = state.activity, p = state.pending;
+  if (!a && !p) { bar.classList.remove("show", "done"); return; }
+  bar.classList.add("show");
+  const reload = $("#ab-reload"), cancel = $("#ab-cancel");
+  if (a) {
+    const pct = Math.max(0, Math.min(100, a.progress || 0));
+    bar.classList.remove("done");
+    $("#ab-fill").style.width = pct + "%";
+    $("#ab-msg").innerHTML = `<span class="ab-dot"></span>` +
+      (a.name ? `Processing “${esc(a.name)}” — ` : "Processing — ") +
+      `${Math.round(pct)}%` + (a.message ? ` · ${esc(a.message)}` : "");
+    cancel.style.display = a.cancellable === false ? "none" : "";
+    cancel.disabled = false;
+    reload.disabled = true;                 // nothing coherent to reload into yet
+    reload.textContent = "Reload";
+  } else {
+    const added = (p.n_frames != null && state.lastFrames != null)
+      ? p.n_frames - state.lastFrames : null;
+    bar.classList.add("done");
+    $("#ab-fill").style.width = "100%";
+    $("#ab-msg").innerHTML = `<span class="ab-dot"></span>` + (
+      added && added > 0
+        ? `${added} new photo${added === 1 ? "" : "s"} added — some moments may have changed.`
+        : `New photos have been added — some moments may have changed.`);
+    cancel.style.display = "none";
+    reload.disabled = false;
+    reload.textContent = "Reload";
+  }
+}
+/** Show the bar immediately on a user action, before the server reports in. */
+function beginActivity(message, name) {
+  state.activity = { progress: 0, message, name: name || "", cancellable: false };
+  updateActivityBar();
+}
+function updateReloadBar() { updateActivityBar(); }   // older call sites
+
+async function doReload() {
+  state.pending = null;
+  state.version = null;          // adopt whatever generation the server is on
+  updateActivityBar();
+  const want = Math.max(PAGE, state.bursts.length);
+  await loadPage(true);
+  while (state.bursts.length < want && state.bursts.length < state.total) await loadPage(false);
+}
+async function pollVersion() {
+  if (!state.hasRun || !state.runId) return;
+  try {
+    const d = await (await fetch("/api/version?run_id=" + state.runId)).json();
+    if (state.version != null && d.version !== state.version) {
+      state.pending = { version: d.version, n_frames: d.n_frames };
+      updateActivityBar();
+    }
+  } catch (e) {}
+}
+
 // ---- runs ----
 async function refreshRuns(selectId) {
   const data = await (await fetch("/api/state")).json();
@@ -681,7 +862,12 @@ async function refreshRuns(selectId) {
 }
 async function selectRun(id) {
   if (!id) { state.hasRun = false; state.bursts = []; $("#grid").innerHTML = ""; state.total = 0; updateBar(); return; }
+  // Selection is per-viewer now: this only warms the server cache. Nobody
+  // else's browser changes shoots because of it.
   await fetch("/api/select_run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ run_id: id }) });
+  state.runId = id; state.version = null; state.pending = null;
+  try { localStorage.setItem("runId", String(id)); } catch (e) {}
+  state.pending = null; updateActivityBar();
   state.hasRun = true; state.query = ""; $("#search-input").value = ""; $("#search-clear").style.display = "none";
   clearSelection();       // a selection from the previous run means nothing here
   await refreshStars();   // stars are per-run, so re-mirror them before painting
@@ -694,17 +880,19 @@ async function pollActive() {
   try {
     const d = await (await fetch("/api/active")).json();
     const a = d.active;
-    const bar = $("#global-ingest");
     if (a) {
-      bar.style.display = "block";
-      $("#gi-fill").style.width = (a.progress || 0) + "%";
-      $("#gi-msg").innerHTML = `<span class="gi-dot"></span>Ingesting “${esc(a.name)}” — ${Math.round(a.progress||0)}% · ${esc(a.message||"")}`;
-      $("#gi-cancel").disabled = false;
+      state.activity = { ...a, cancellable: true };
       _wasActive = true;
-    } else {
-      bar.style.display = "none";
-      if (_wasActive) { _wasActive = false; refreshRuns(); }  // a run just finished → everyone's dropdown updates
+    } else if (state.activity && state.activity.cancellable !== false) {
+      // Work just finished — check for new data right away so Reload lights up
+      // immediately instead of waiting for the next version poll.
+      state.activity = null;
+      await pollVersion();
+    } else if (!_wasActive) {
+      state.activity = null;
     }
+    if (!a && _wasActive) { _wasActive = false; refreshRuns(state.runId); }
+    updateActivityBar();
   } catch (e) {}
 }
 
@@ -715,7 +903,6 @@ function resetUploadForm() {
   const sel = $("#upload-selection");
   sel.textContent = "No folder selected"; sel.className = "";
   $("#ingest-btn").disabled = true;       // re-enabled when a new folder is picked
-  $("#server-path-input").value = "";
 }
 let ingestPoll = null;
 function setProgress(pct, msg, isError) {
@@ -730,18 +917,17 @@ function pollIngest(runId) {
     setProgress(d.progress, d.message, d.status === "error");
     if (d.status === "ready") {
       clearInterval(ingestPoll);
-      $("#ingest-path-btn").disabled = false;   // #ingest-btn is gated by folder selection
       await refreshRuns(runId);
       await selectRun(runId);
       setTimeout(() => { $("#upload-panel").style.display = "none"; $("#progress-wrap").style.display = "none"; }, 1200);
     } else if (d.status === "error") {
-      clearInterval(ingestPoll); $("#ingest-path-btn").disabled = false;
+      clearInterval(ingestPoll);
     }
   }, 1000);
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
-  $("#load-more").addEventListener("click", () => loadPage(false));
+  $("#load-more").addEventListener("click", () => state.pending ? doReload() : loadPage(false));
 
   // zoom control — restore the viewer's last size before the first render
   $("#zoom-select").innerHTML = ZOOM_LEVELS.map(z => `<option value="${z}">${z}%</option>`).join("");
@@ -758,6 +944,40 @@ document.addEventListener("DOMContentLoaded", async () => {
     loadPage(true);
   });
   $("#run-select").addEventListener("change", e => selectRun(parseInt(e.target.value) || 0));
+
+  // Delete a shoot. Two-step on purpose: we tell them exactly what disappears
+  // first, because for an uploaded shoot this is the only copy of the photos.
+  $("#delete-run").addEventListener("click", async () => {
+    const id = state.runId;
+    if (!id) return;
+    let d;
+    try {
+      d = await (await fetch("/api/run/preview_delete?run_id=" + id)).json();
+    } catch (e) { alert("Could not check that shoot."); return; }
+    if (d.error) { alert(d.error); return; }
+    if (d.busy) { alert("That shoot is being processed or watched right now."); return; }
+
+    const gb = n => n >= 1e9 ? (n/1e9).toFixed(1) + " GB" : Math.max(1, Math.round(n/1e6)) + " MB";
+    let msg = `Delete “${d.name}” (${d.n_images} images)?\n\n`;
+    msg += d.holds_originals
+      ? `⚠ This shoot holds the ONLY copy of ${d.n_originals} original photo${d.n_originals === 1 ? "" : "s"} (${gb(d.originals_bytes)}).\n` +
+        `They were uploaded here and exist nowhere else. Deleting is permanent.\n\n`
+      : `The original photos are NOT stored here and will not be touched — only the ranking data (${gb(d.total_bytes)}).\n\n`;
+    msg += "This cannot be undone. Continue?";
+    if (!confirm(msg)) return;
+    if (d.holds_originals && !confirm(`Really delete ${d.n_originals} original photos? Last chance.`)) return;
+
+    const res = await fetch("/api/delete_run", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_id: id }),
+    });
+    const r = await res.json().catch(() => ({}));
+    if (!res.ok) { alert(r.error || "Could not delete that shoot."); return; }
+    try { localStorage.removeItem("runId"); } catch (e) {}
+    state.runId = null; state.version = null; state.pending = null;
+    const { runs, curId } = await refreshRuns();
+    await selectRun(runs.length ? (curId || runs[0].id) : 0);
+  });
 
   // shot pills
   $$("#shot-pills .pill.shot").forEach(p => p.addEventListener("click", () => {
@@ -800,6 +1020,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     updateActionBar();
   });
   $("#sel-clear").addEventListener("click", clearSelection);
+  $$("#owner-seg button").forEach(b => b.addEventListener("click", () => {
+    state.starOwner = b.dataset.owner;
+    $$("#owner-seg button").forEach(x => x.classList.toggle("active", x === b));
+    loadPage(true);
+  }));
   $("#sel-all").addEventListener("click", () => {
     // "loaded" is deliberate: selecting rows the user hasn't seen (and could be
     // thousands of frames / many GB) shouldn't be one unlabelled click away.
@@ -812,13 +1037,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     else downloadMany({ scope: "starred" }, e.target);
   });
   $("#clear-starred").addEventListener("click", async () => {
-    const n = state.stars.size;
+    const n = state.starsMine.size;
     if (!n) return;
     // Stars are shared across everyone viewing this run, so this can discard
     // someone else's picks — never do it on a single unconfirmed click.
-    if (!confirm(`Unstar all ${n} frame${n === 1 ? "" : "s"} in this run?\n\n` +
-                 `Stars are shared with everyone viewing it. This can't be undone.`)) return;
-    const res = await fetch("/api/stars/clear", { method: "POST" });
+    if (!confirm(
+      `Remove your ${n} star${n === 1 ? "" : "s"} from this shoot?\n\n` +
+      `Only yours are removed — everyone else's are left alone.\n` +
+      `This can't be undone.`)) return;
+    const res = await fetch("/api/stars/clear", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_id: state.runId, viewer: state.viewer }) });
     if (!res.ok) { alert("Could not clear stars."); return; }
     await refreshStars();
     loadPage(true);
@@ -843,6 +1072,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   // modal
   $("#modal-close").addEventListener("click", closeModal);
   $("#modal-bg").addEventListener("click", e => { if (e.target.id === "modal-bg") closeModal(); });
+  $("#strip-toggle").addEventListener("click", () => {
+    state.burstOrder = state.burstOrder === "time" ? "rank" : "time";
+    if (state.openBurst) renderStrip(state.openBurst, state.openFrame && state.openFrame.path);
+  });
   $("#modal-prev").addEventListener("click", () => step(-1));
   $("#modal-next").addEventListener("click", () => step(1));
   document.addEventListener("keydown", e => {
@@ -876,11 +1109,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     p.style.display = p.style.display === "block" ? "none" : "block";
   });
   $("#upload-cancel").addEventListener("click", () => { $("#upload-panel").style.display = "none"; });
-  $("#gi-cancel").addEventListener("click", async () => {
-    $("#gi-cancel").disabled = true;
-    $("#gi-msg").innerHTML = `<span class="gi-dot"></span>Cancelling…`;
+  $("#ab-cancel").addEventListener("click", async () => {
+    $("#ab-cancel").disabled = true;
+    $("#ab-msg").innerHTML = `<span class="ab-dot"></span>Cancelling…`;
     try { await fetch("/api/cancel_ingest", { method: "POST" }); } catch (e) {}
   });
+  $("#ab-reload").addEventListener("click", () => { if (!$("#ab-reload").disabled) doReload(); });
   $("#browse-btn").addEventListener("click", () => $("#folder-input").click());
   $("#folder-input").addEventListener("change", () => {
     const files = Array.from($("#folder-input").files);
@@ -897,6 +1131,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!files.length) return;
     $("#ingest-btn").disabled = true;
     setProgress(1, "Preparing upload…");
+    beginActivity("Preparing upload…", $("#run-name-input").value.trim());
     try {
       const fd0 = new FormData();
       const nm = $("#run-name-input").value.trim();
@@ -914,7 +1149,9 @@ document.addEventListener("DOMContentLoaded", async () => {
         const r = await fetch("/api/upload/chunk", { method: "POST", body: fd });
         if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || "upload failed"); }
         sent += Math.min(UPLOAD_BATCH, files.length - i);
-        setProgress(Math.round(sent / files.length * 40), `Uploading… ${sent}/${files.length}`);
+        const pct = Math.round(sent / files.length * 40);
+        setProgress(pct, `Uploading… ${sent}/${files.length}`);
+        beginActivity(`Uploading… ${sent}/${files.length}`, $("#run-name-input").value.trim());
       }
 
       // Finish → start ingestion. If another ingest is running, wait and retry.
@@ -937,37 +1174,70 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     } catch (e) {
       setProgress(0, "Upload failed: " + (e.message || e), true);
+      state.activity = null; updateActivityBar();
       $("#ingest-btn").disabled = false;
     }
   });
 
-  // ingest a folder already on the server (no upload)
-  $("#ingest-path-btn").addEventListener("click", async () => {
-    const path = $("#server-path-input").value.trim();
-    if (!path) { setProgress(0, "Enter a server folder path.", true); return; }
-    $("#ingest-path-btn").disabled = true;
-    setProgress(2, "Starting…");
+  // hot folder controls
+  $("#hf-start-btn").addEventListener("click", async () => {
+    const path = $("#hf-path-input").value.trim();
+    if (!path) { setProgress(0, "Enter a folder to watch.", true); return; }
+    $("#hf-start-btn").disabled = true;
     try {
-      const res = await fetch("/api/ingest_path", {
+      const res = await fetch("/api/hotfolder/start", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path, name: $("#run-name-input").value.trim() }),
       });
-      const d = await res.json();
-      if (!res.ok) { setProgress(0, d.error || "Failed", true); $("#ingest-path-btn").disabled = false; return; }
-      pollIngest(d.run_id);
+      // A missing route returns HTML, so res.json() throws — don't let that
+      // become a silent no-op the way it did before.
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setProgress(0, d.error || `Could not start watching (HTTP ${res.status})`, true);
+        return;
+      }
+      beginActivity("Watching — first batch starting…", path.split("/").pop());
+      setProgress(2, "Watching — the first batch is being processed…");
+      await refreshRuns(d.run_id);
+      await selectRun(d.run_id);          // this viewer follows the live shoot
+      await pollHotFolder();
     } catch (e) {
-      setProgress(0, "Request failed", true); $("#ingest-path-btn").disabled = false;
-    }
+      setProgress(0, "Could not start watching: " + (e.message || e), true);
+    } finally { $("#hf-start-btn").disabled = false; }
+  });
+  $("#hf-stop-btn").addEventListener("click", async () => {
+    await fetch("/api/hotfolder/stop", { method: "POST" });
+    await pollHotFolder();
   });
 
-  // init
-  const { curId } = await refreshRuns();
-  if (curId) { state.hasRun = true; await refreshStars(); loadPage(true); }
-  else updateBar();
+  // A stable per-browser id, so "your stars" means something without accounts.
+  try {
+    state.viewer = localStorage.getItem("viewerId");
+    if (!state.viewer) {
+      state.viewer = "v" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+      localStorage.setItem("viewerId", state.viewer);
+    }
+  } catch (e) { state.viewer = "anon"; }
+
+  // init — this viewer's last shoot wins over the server's suggestion, so two
+  // people on the same server keep their own selections across refreshes.
+  let savedRun = null;
+  try { savedRun = parseInt(localStorage.getItem("runId"), 10) || null; } catch (e) {}
+  const { runs, curId } = await refreshRuns(savedRun);
+  const pick = (savedRun && runs.some(r => r.id === savedRun)) ? savedRun : curId;
+  if (pick) {
+    state.runId = pick; state.hasRun = true;
+    $("#run-select").value = String(pick);
+    await refreshStars(); loadPage(true);
+  } else updateBar();
 
   // global ingest bar: poll continuously so all users see in-progress ingestion
   pollActive();
   setInterval(pollActive, 2000);
+  // Same cadence: cheap (a stat + one DB row) and keeps the banner responsive.
+  setInterval(pollVersion, 2000);
+  pollHotFolder();
+  setInterval(pollHotFolder, 5000);
 });
 </script>
 </body>

@@ -254,7 +254,14 @@ class Config:
         self.model_path.parent.mkdir(parents=True, exist_ok=True)
 
 
-IMAGE_EXTS: List[str] = [".jpg", ".jpeg", ".png", ".webp", ".JPG", ".JPEG", ".PNG", ".WEBP"]
+_BASE_EXTS = [".jpg", ".jpeg", ".png", ".webp"]
+# RAW is read via its embedded preview (see imaging.open_image), so these are
+# first-class inputs rather than a special case.
+_RAW_EXTS = [".cr2", ".cr3", ".arw", ".nef", ".raf", ".orf", ".rw2", ".dng"]
+IMAGE_EXTS: List[str] = (
+    [e for e in _BASE_EXTS] + [e.upper() for e in _BASE_EXTS]
+    + [e for e in _RAW_EXTS] + [e.upper() for e in _RAW_EXTS]
+)
 
 # Training-set folder names. -1 means "genuinely unlabeled" — those frames are
 # excluded from training rather than treated as negatives.

@@ -21,8 +21,9 @@ import numpy as np
 from PIL import Image
 from tqdm import tqdm
 
-from .cache_io import FeatureCache, file_sha1
+from .cache_io import FeatureCache, Sha1Memo, file_sha1
 from .config import FeatureConfig
+from .imaging import open_image
 from .encoders import FrozenEncoder, build_encoder, build_face_encoder_with_fallback
 from .face import FaceAnalyzer, FaceMetrics, maybe_get_va
 
@@ -114,6 +115,9 @@ class FeatureExtractor:
     def __init__(self, fc: FeatureConfig, cache: FeatureCache) -> None:
         self.fc = fc
         self.cache = cache
+        # Lives beside the feature cache: both are keyed to the same content and
+        # both are safe to share between machines and delete at will.
+        self._memo = Sha1Memo(cache.root / "sha1_memo.db")
         self._ctx: FrozenEncoder | None = None
         self._face_enc: FrozenEncoder | None = None
         self._face_an: FaceAnalyzer | None = None
@@ -180,7 +184,7 @@ class FeatureExtractor:
 
     def _extract_chunk(self, paths: Sequence[Path], desc: str) -> List[FeatureBundle]:
         # Triage which paths actually need recompute (per kind).
-        sha1s = [file_sha1(p) for p in paths]
+        sha1s = self._memo.sha1_many(paths)
         ctx_id = self._ctx_id_lazy()
         face_id = self._face_id_lazy()
         # Body crop depends on the detected face box, so its embedding is also
@@ -209,7 +213,7 @@ class FeatureExtractor:
         if need_recrop:
             an = self._face_analyzer()
             for i in tqdm(need_recrop, desc=f"{desc}: face/quality"):
-                im = Image.open(paths[i]).convert("RGB")
+                im = open_image(paths[i]).convert("RGB")
                 full, face, body, m = an.analyze(im)
                 full_imgs[i] = full
                 face_crops[i] = face

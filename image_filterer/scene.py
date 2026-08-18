@@ -71,10 +71,16 @@ class SceneAnalyzer:
             self._model = YOLO(str(local) if local.is_file() else self.cfg.yolo_model)
         return self._model
 
-    def raw(self, sha1: str, pil: Image.Image) -> np.ndarray:
+    def raw(self, sha1: str, pil) -> np.ndarray:
+        """``pil`` may be an image or a zero-arg callable returning one.
+
+        Pass a callable when re-running over a mostly-cached folder: opening the
+        file is only worth paying for on a miss, and for RAW a needless open
+        means pulling a 30 MB container off disk (or off a network share).
+        """
         if self.cache.has(sha1, "scene", SCENE_CACHE_ID):
             return self.cache.load(sha1, "scene", SCENE_CACHE_ID)["z"]
-        img = pil.convert("RGB")
+        img = (pil() if callable(pil) else pil).convert("RGB")
         W, H = img.size
         res = self._yolo().predict(img, verbose=False, device=self.device)[0]
         box_norm = None

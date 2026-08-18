@@ -70,11 +70,44 @@ def _camera_id_from_exif(named: Dict[str, object], path: Path) -> str:
     return f"unknown:{path.name}"  # last-resort singleton
 
 
+def _raw_exif(path: Path) -> Dict[str, object]:
+    """EXIF for a RAW file, via pyexiv2.
+
+    The embedded preview we decode RAW through does NOT carry
+    DateTimeOriginal, so reading the container itself is the only way to place a
+    RAW frame on the timeline. Without pyexiv2 we return nothing and the frame
+    becomes its own single-frame burst rather than being lost.
+    """
+    if not _HAS_PYEXIV2:
+        return {}
+    try:
+        img = pyexiv2.Image(str(path))
+        e = img.read_exif()
+        img.close()
+    except Exception:
+        return {}
+    out: Dict[str, object] = {}
+    for tag, name in (("Exif.Photo.DateTimeOriginal", "DateTimeOriginal"),
+                      ("Exif.Photo.SubSecTimeOriginal", "SubsecTimeOriginal"),
+                      ("Exif.Image.Make", "Make"),
+                      ("Exif.Image.Model", "Model"),
+                      ("Exif.Image.BodySerialNumber", "BodySerialNumber"),
+                      ("Exif.Photo.BodySerialNumber", "BodySerialNumber"),
+                      ("Exif.Photo.LensModel", "LensModel")):
+        if tag in e and e[tag] and name not in out:
+            out[name] = e[tag]
+    return out
+
+
 def read_frame_meta(path: Path) -> Optional[FrameMeta]:
     try:
-        im = Image.open(path)
-        exif = im._getexif() or {}
-        named = {ExifTags.TAGS.get(k, str(k)): v for k, v in exif.items()}
+        from .imaging import is_raw
+        if is_raw(path):
+            named = _raw_exif(path)
+        else:
+            im = Image.open(path)
+            exif = im._getexif() or {}
+            named = {ExifTags.TAGS.get(k, str(k)): v for k, v in exif.items()}
         dt_str = named.get("DateTimeOriginal")
         if not dt_str:
             return None

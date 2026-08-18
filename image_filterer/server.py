@@ -23,6 +23,8 @@ import subprocess
 import threading
 import time
 import zipfile
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from datetime import datetime
 
 try:
@@ -41,6 +43,7 @@ from PIL import Image
 from .config import Config, default_config
 from .db import RunDB
 from .ingest import ingest_folder
+from .pipeline import read_version
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 
@@ -54,29 +57,61 @@ def _safe_name(name: str) -> str:
     return s[:60] or "run"
 
 
+@dataclass
+class LoadedRun:
+    """One run's data, held in memory.
+
+    Runs are cached per id rather than kept in a single global slot: run
+    selection is per-viewer, so two people can browse different shoots at once
+    without one of them yanking the other's view.
+
+    ``version`` is the generation the data was read at. It is re-checked on every
+    lookup, so a background re-ingest is picked up automatically, and clients
+    paginating against an older generation can be told to reload.
+    """
+
+    run_id: int
+    run_dir: Path
+    ranked: "pd.DataFrame"
+    bursts: "pd.DataFrame"
+    version: int
+    # path -> set of viewer ids that starred it. A star belongs to whoever made
+    # it: several people can star the same frame, and un-starring only ever
+    # removes your own. (Before this, clicking a colleague's star deleted it.)
+    stars: Dict[str, Set[str]] = field(default_factory=dict)
+    emb: Optional[np.ndarray] = None
+    emb_context: Optional[str] = None
+    shot_types: Optional[np.ndarray] = None
+    captured: Optional[np.ndarray] = None
+    stars_lock: threading.Lock = field(default_factory=threading.Lock)
+
+
 def create_app(cfg: Optional[Config] = None) -> Flask:
     cfg = cfg or default_config()
     cfg.ensure_dirs()
     db = RunDB(cfg.db_path)
 
     app = Flask(__name__, template_folder=str(PACKAGE_DIR / "templates"))
+    # Per-run cache. Small: a run is a CSV plus a ~15 MB embedding matrix, and
+    # holding a few lets several viewers browse different shoots concurrently.
+    runs_cache: "OrderedDict[int, LoadedRun]" = OrderedDict()
+    runs_lock = threading.Lock()
+    RUN_CACHE_MAX = 3
+
     state: Dict[str, object] = {
-        "run_id": None,
-        "run_dir": None,
-        "ranked": None,
-        "bursts": None,
-        "allowed_roots": set(),
-        "emb": None,
-        "emb_context": None,
+        # Genuinely global: one GPU, one ingest at a time, one shared text tower.
+        "allowed_roots": set(),          # union over every run loaded this session
         "text_encoder": None,
-        "shot_types": None,
-        "captured": None,                # epoch seconds per ranked row (chronological sort)
-        "stars": set(),                  # starred frame paths for the loaded run
-        "stars_lock": threading.Lock(),
         "search_lock": threading.Lock(),
         "ingest_lock": threading.Lock(),
-        "active_ingest": None,           # run_id currently ingesting (global, single-flight)
+        "active_ingest": None,           # run_id currently ingesting (single-flight)
+        # Live progress for whatever is processing, set by every ingest path.
+        # Kept here rather than derived from the run's DB status: a hot-folder
+        # batch deliberately leaves its run "ready" so viewers don't lose it
+        # mid-event, which used to make those ingests invisible.
+        "active_progress": None,         # {run_id, name, progress, message}
         "cancel_event": threading.Event(),
+        "hotfolder": None,               # at most one HotFolderWatcher, ever
     }
 
     # ----------------------------- stars
@@ -86,71 +121,160 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
     # saving. They live in the run's own folder, next to ranked.csv, which makes
     # them shared by every viewer and portable with the run.
 
-    def _load_stars(run_dir: Path) -> Set[str]:
+    LEGACY_VIEWER = "legacy"   # stars made before ownership was tracked
+
+    def _load_stars(run_dir: Path) -> Dict[str, Set[str]]:
         p = run_dir / "stars.json"
         if not p.exists():
-            return set()
-        try:
-            return {str(x) for x in (json.loads(p.read_text()).get("starred") or [])}
-        except Exception:  # noqa: BLE001 — a corrupt stars file must not block the run
-            return set()
-
-    def _save_stars() -> None:
-        """Write via a temp file + rename so a crash mid-write can't truncate it."""
-        run_dir = state["run_dir"]
-        if run_dir is None:
-            return
-        payload = json.dumps({"starred": sorted(state["stars"])}, indent=1)
-        tmp = Path(run_dir) / "stars.json.tmp"
-        tmp.write_text(payload)
-        tmp.replace(Path(run_dir) / "stars.json")
-
-    def _starred_counts() -> Dict[int, int]:
-        """burst_id → how many of its frames are starred."""
-        ranked = state["ranked"]
-        if ranked is None or not state["stars"]:
             return {}
-        hit = ranked[ranked["path"].astype(str).isin(state["stars"])]
+        try:
+            blob = json.loads(p.read_text())
+        except Exception:  # noqa: BLE001 — a corrupt stars file must not block the run
+            return {}
+        if isinstance(blob.get("stars"), dict):          # current format
+            return {str(k): {str(v) for v in (vs or [])} for k, vs in blob["stars"].items()}
+        # v1: a flat list with no owner. Attribute to nobody in particular.
+        return {str(x): {LEGACY_VIEWER} for x in (blob.get("starred") or [])}
+
+    def _save_stars(rn: LoadedRun) -> None:
+        """Write via a temp file + rename so a crash mid-write can't truncate it."""
+        payload = json.dumps({
+            "version": 2,
+            "stars": {k: sorted(v) for k, v in sorted(rn.stars.items()) if v},
+        }, indent=1)
+        tmp = rn.run_dir / "stars.json.tmp"
+        tmp.write_text(payload)
+        tmp.replace(rn.run_dir / "stars.json")
+
+    def _viewer() -> str:
+        """Who is asking. Browser-generated id — there are no accounts here."""
+        v = request.args.get("viewer")
+        if not v and request.method == "POST":
+            v = (request.get_json(silent=True) or {}).get("viewer")
+        return str(v or "anon")
+
+    def _star_owners(rn: LoadedRun, path: str) -> Set[str]:
+        return rn.stars.get(str(path), set())
+
+    def _star_flags(rn: LoadedRun, path: str, me: str) -> Dict[str, bool]:
+        owners = _star_owners(rn, path)
+        return {"starred": bool(owners),
+                "starred_mine": me in owners,
+                "starred_others": bool(owners - {me})}
+
+    def _paths_for_owner(rn: LoadedRun, me: str, owner: str) -> Set[str]:
+        """Starred paths filtered to all / just mine / just other people's."""
+        if owner == "mine":
+            return {p for p, o in rn.stars.items() if me in o}
+        if owner == "others":
+            return {p for p, o in rn.stars.items() if o - {me}}
+        return {p for p, o in rn.stars.items() if o}
+
+    def _starred_counts(rn: LoadedRun) -> Dict[int, int]:
+        """burst_id → how many of its frames are starred by anyone."""
+        if not rn.stars:
+            return {}
+        hit = rn.ranked[rn.ranked["path"].astype(str).isin(set(rn.stars))]
         return {int(b): int(n) for b, n in hit.groupby("burst_id").size().items()}
 
     # ----------------------------- run loading
 
-    def load_run(run_id: int) -> bool:
+    def _read_run(run_id: int) -> Optional[LoadedRun]:
+        """Read one run's outputs as a CONSISTENT snapshot.
+
+        The version is read before and after the files. If it moved, an ingest
+        committed mid-read and the files we just read may be a mixture of two
+        generations, so we try again. That, plus writers bumping the version only
+        after every output is in place, is what guarantees a viewer never sees a
+        half-applied batch.
+        """
         row = db.get(run_id)
         if not row or row["status"] != "ready":
-            return False
+            return None
         run_dir = cfg.runs_dir / row["folder"]
         if not (run_dir / "ranked.csv").exists():
-            return False
-        ranked = pd.read_csv(run_dir / "ranked.csv")
-        bursts = pd.read_csv(run_dir / "bursts.csv")
-        roots: Set[str] = set()
-        for p in ranked["path"]:
+            return None
+
+        for _ in range(10):
+            version = read_version(run_dir)
+            if version % 2 == 1:
+                # Odd = a write is in flight; the files may disagree. Wait it out.
+                time.sleep(0.03)
+                continue
             try:
-                roots.add(str(Path(p).resolve().parent))
-            except Exception:
-                pass
-        state.update({
-            "run_id": run_id, "run_dir": run_dir, "ranked": ranked, "bursts": bursts,
-            "allowed_roots": roots, "emb": None, "emb_context": None,
-            "shot_types": None, "captured": None, "stars": _load_stars(run_dir),
-        })
-        # search index (row-aligned) if present
-        npy = run_dir / "search_index.npy"
-        if npy.exists():
-            try:
-                mat = np.load(npy)
-                if mat.ndim == 2 and mat.shape[0] == len(ranked):
-                    state["emb"] = mat.astype(np.float32)
-                    meta = run_dir / "search_index.json"
-                    ctx = json.loads(meta.read_text()).get("context_encoder", cfg.features.context_encoder) \
-                        if meta.exists() else cfg.features.context_encoder
-                    state["emb_context"] = ctx
-            except Exception:
-                pass
-        if "shot_type" in ranked.columns and ranked["shot_type"].astype(str).str.len().gt(0).any():
-            state["shot_types"] = ranked["shot_type"].astype(str).to_numpy()
-        return True
+                ranked = pd.read_csv(run_dir / "ranked.csv")
+                bursts = pd.read_csv(run_dir / "bursts.csv")
+            except Exception:  # noqa: BLE001 — mid-rename; retry
+                continue
+            rn = LoadedRun(run_id=run_id, run_dir=run_dir, ranked=ranked, bursts=bursts,
+                           version=version, stars=_load_stars(run_dir))
+            npy = run_dir / "search_index.npy"
+            if npy.exists():
+                try:
+                    mat = np.load(npy)
+                    if mat.ndim == 2 and mat.shape[0] == len(ranked):
+                        rn.emb = mat.astype(np.float32)
+                        meta = run_dir / "search_index.json"
+                        rn.emb_context = (
+                            json.loads(meta.read_text()).get("context_encoder",
+                                                             cfg.features.context_encoder)
+                            if meta.exists() else cfg.features.context_encoder)
+                except Exception:  # noqa: BLE001
+                    pass
+            if "shot_type" in ranked.columns and ranked["shot_type"].astype(str).str.len().gt(0).any():
+                rn.shot_types = ranked["shot_type"].astype(str).to_numpy()
+            if read_version(run_dir) != version:
+                continue                      # a batch landed mid-read — retry
+            for pth in ranked["path"]:
+                try:
+                    state["allowed_roots"].add(str(Path(pth).resolve().parent))
+                except Exception:  # noqa: BLE001
+                    pass
+            return rn
+        return None
+
+    def get_run(run_id: Optional[int]) -> Optional[LoadedRun]:
+        """Cached run, reloaded automatically when its generation has moved on."""
+        if run_id is None:
+            return None
+        with runs_lock:
+            rn = runs_cache.get(int(run_id))
+            if rn is not None and read_version(rn.run_dir) == rn.version:
+                runs_cache.move_to_end(int(run_id))
+                return rn
+            previous = rn          # keep as a fallback while a write is in flight
+        # Load outside the lock: reading a run takes ~a second and must not block
+        # every other viewer's request.
+        fresh = _read_run(int(run_id))
+        if fresh is None:
+            # Couldn't get a clean snapshot (a writer is mid-batch). Serving the
+            # previous complete generation is strictly better than an empty view;
+            # the client's poll will pick up the new one a moment later.
+            return previous
+        with runs_lock:
+            runs_cache[int(run_id)] = fresh
+            runs_cache.move_to_end(int(run_id))
+            while len(runs_cache) > RUN_CACHE_MAX:
+                runs_cache.popitem(last=False)
+        return fresh
+
+    def _default_run_id() -> Optional[int]:
+        """Fallback for clients that send no run_id: the newest ready run."""
+        for r in db.list(include_unready=False):
+            return int(r["id"])
+        return None
+
+    def resolve_run() -> Optional[LoadedRun]:
+        """The run THIS request is about — per viewer, never global state."""
+        raw = request.args.get("run_id")
+        if raw is None and request.method == "POST":
+            body = request.get_json(silent=True) or {}
+            raw = body.get("run_id", request.form.get("run_id"))
+        try:
+            run_id = int(raw) if raw not in (None, "") else None
+        except (TypeError, ValueError):
+            run_id = None
+        return get_run(run_id if run_id is not None else _default_run_id())
 
     def _get_text_encoder(ctx: str):
         te = state["text_encoder"]
@@ -161,31 +285,27 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         state["text_encoder"] = te
         return te
 
-    def _ensure_shot_types() -> Optional[np.ndarray]:
-        st = state["shot_types"]
-        if st is not None:
-            return st
-        ranked = state["ranked"]
-        emb = state["emb"]
-        if ranked is None or emb is None or len(emb) != len(ranked):
+    def _ensure_shot_types(rn: LoadedRun) -> Optional[np.ndarray]:
+        if rn.shot_types is not None:
+            return rn.shot_types
+        if rn.emb is None or len(rn.emb) != len(rn.ranked):
             return None
-        ctx = state["emb_context"] or cfg.features.context_encoder
+        ctx = rn.emb_context or cfg.features.context_encoder
         from .encoders import context_encoder_has_text_tower
         if not context_encoder_has_text_tower(ctx):
             return None
         from .shots import compute_shot_types
         with state["search_lock"]:
             te = _get_text_encoder(ctx)
-            labels, _ = compute_shot_types(emb, ctx, cfg.shots, text_encoder=te)
+            labels, _ = compute_shot_types(rn.emb, ctx, cfg.shots, text_encoder=te)
         if not labels:
             return None
-        st = np.asarray(labels)
-        state["shot_types"] = st
-        return st
+        rn.shot_types = np.asarray(labels)
+        return rn.shot_types
 
     # ----------------------------- capture times (chronological sort)
 
-    def _capture_times() -> Optional[np.ndarray]:
+    def _capture_times(rn: LoadedRun) -> Optional[np.ndarray]:
         """Epoch seconds per ``ranked`` row, or None if unobtainable.
 
         Capture time isn't a column in older runs — EXIF is read during burst
@@ -193,12 +313,9 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         result beside the run. Reading DateTimeOriginal costs ~0.3 ms/frame, so
         a full 3,000-frame backfill is about a second, once.
         """
-        if state["captured"] is not None:
-            return state["captured"]
-        ranked = state["ranked"]
-        if ranked is None:
-            return None
-        run_dir = state["run_dir"]
+        if rn.captured is not None:
+            return rn.captured
+        ranked = rn.ranked
         arr: Optional[np.ndarray] = None
 
         if "captured_at" in ranked.columns:      # written by newer ingests
@@ -207,8 +324,8 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
                 arr = ts.map(lambda x: x.timestamp() if pd.notna(x) else np.nan) \
                         .to_numpy(dtype=np.float64)
 
-        side = (Path(run_dir) / "captured_at.json") if run_dir else None
-        if arr is None and side is not None and side.exists():
+        side = rn.run_dir / "captured_at.json"
+        if arr is None and side.exists():
             try:
                 cached = json.loads(side.read_text())
                 arr = np.array([float(cached[str(p)]) if cached.get(str(p)) is not None else np.nan
@@ -229,54 +346,54 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
                 except OSError:
                     vals.append(float("nan"))
             arr = np.array(vals, dtype=np.float64)
-            if side is not None:
-                try:
-                    side.write_text(json.dumps({
-                        str(p): (None if np.isnan(v) else v)
-                        for p, v in zip(ranked["path"], arr)}))
-                except OSError:
-                    pass
-        state["captured"] = arr
+            try:
+                side.write_text(json.dumps({
+                    str(p): (None if np.isnan(v) else v)
+                    for p, v in zip(ranked["path"], arr)}))
+            except OSError:
+                pass
+        rn.captured = arr
         return arr
 
-    def _burst_min_times() -> Dict[int, float]:
+    def _burst_min_times(rn: LoadedRun) -> Dict[int, float]:
         """burst_id → capture time of its earliest frame."""
-        ct = _capture_times()
-        ranked = state["ranked"]
-        if ct is None or ranked is None:
+        ct = _capture_times(rn)
+        if ct is None:
             return {}
-        s = pd.Series(ct, index=ranked.index).groupby(ranked["burst_id"]).min()
+        s = pd.Series(ct, index=rn.ranked.index).groupby(rn.ranked["burst_id"]).min()
         return {int(b): float(v) for b, v in s.items()}
 
-    def _iso(ts: float) -> str:
+    def _iso(ts: Optional[float]) -> str:
         if ts is None or (isinstance(ts, float) and np.isnan(ts)):
             return ""
         return datetime.fromtimestamp(ts).isoformat(sep=" ", timespec="seconds")
 
-    def _burst_rep_shot_map() -> Dict[int, str]:
-        st = _ensure_shot_types()
+    def _burst_rep_shot_map(rn: LoadedRun) -> Dict[int, str]:
+        st = _ensure_shot_types(rn)
         if st is None:
             return {}
-        ranked = state["ranked"]
-        rep = ranked.assign(_shot=st)
+        rep = rn.ranked.assign(_shot=st)
         rep = rep[rep["is_representative"].astype(bool)]
         return {int(b): str(s) for b, s in zip(rep["burst_id"], rep["_shot"])}
 
-    # Load most-recent ready run on startup.
-    for r in db.list(include_unready=False):
-        if load_run(r["id"]):
-            break
+    # Warm the cache with the newest ready run so the first request is quick.
+    get_run(_default_run_id())
 
     # ----------------------------- ingestion
 
     def _do_ingest(run_id: int, folder: Path) -> None:
         cancel = state["cancel_event"]
 
+        row0 = db.get(run_id)
+        run_name = row0["name"] if row0 else ""
+
         def cb(pct: float, msg: str) -> None:
             # Cooperative cancellation: this fires between feature chunks and at
             # each phase boundary, so Cancel takes effect within a chunk or two.
             if cancel.is_set():
                 raise _Cancelled()
+            state["active_progress"] = {"run_id": run_id, "name": run_name,
+                                        "progress": float(pct), "message": msg}
             db.update(run_id, progress=float(pct), message=msg, status="ingesting")
 
         try:
@@ -300,6 +417,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
                       message=f"Error: {exc}")
         finally:
             state["active_ingest"] = None
+            state["active_progress"] = None
             state["ingest_lock"].release()
 
     def _upload_dir_for(run_id: int) -> Optional[Path]:
@@ -368,11 +486,74 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
             state["ingest_lock"].release()
             raise
 
-    @app.route("/api/ingest_path", methods=["POST"])
-    def api_ingest_path():
-        """Ingest a folder that already lives on THIS machine (a local path or a
-        mounted share) — no upload. The fast path when the data is on the compute
-        box: images are read/served in place, nothing is copied over the network."""
+    # ----------------------------- hot folder
+    #
+    # One watcher at a time, opt-in, and self-stopping. Watching is NOT something
+    # runs acquire by existing: an ingested shoot is inert files on disk, and
+    # nothing polls it. That keeps the cost proportional to what's actually live
+    # rather than to how many shoots have ever been processed.
+
+    def _hot_ingest(batch: List[Path]) -> bool:
+        """Fold the watched folder into its run. Returns False if the GPU is busy.
+
+        Re-ingests the WHOLE folder rather than just ``batch``: the content cache
+        makes already-seen frames nearly free, and it keeps bursts, dedup and the
+        ranking correct across the entire shoot instead of stapling new photos on
+        the end.
+        """
+        hw = state["hotfolder"]
+        if hw is None:
+            return True
+        # Never queue behind a manual upload — decline and retry next tick.
+        if not state["ingest_lock"].acquire(blocking=False):
+            return False
+        run_id = hw.run_id
+        try:
+            state["active_ingest"] = run_id
+            row = db.get(run_id)
+            if not row:
+                return True
+            run_dir = cfg.runs_dir / row["folder"]
+            run_dir.mkdir(parents=True, exist_ok=True)
+            first_time = row["status"] != "ready"
+
+            def cb(pct: float, msg: str) -> None:
+                if state["cancel_event"].is_set():
+                    raise _Cancelled()
+                state["active_progress"] = {"run_id": run_id, "name": row["name"],
+                                            "progress": float(pct), "message": msg}
+                fields = {"progress": float(pct), "message": msg}
+                # A run that's already live must stay selectable while it grows;
+                # only the very first pass may show as "ingesting".
+                if first_time:
+                    fields["status"] = "ingesting"
+                db.update(run_id, **fields)
+
+            res = ingest_folder(Path(hw.folder), cfg, run_dir, progress_cb=cb)
+            db.update(run_id, status="ready", progress=100.0,
+                      n_images=res["n_images"], n_bursts=res["n_bursts"],
+                      message=f"Watching — {res['n_images']} images, {res['n_bursts']} bursts.")
+            return True
+        except _Cancelled:
+            db.update(run_id, message="Hot folder ingest cancelled.")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            # Consume the batch rather than retrying forever: the folder is
+            # re-scanned in full next pass, so nothing is actually lost.
+            db.update(run_id, message=f"Hot folder error: {exc}")
+            return True
+        finally:
+            state["active_ingest"] = None
+            state["active_progress"] = None
+            state["ingest_lock"].release()
+
+    @app.route("/api/hotfolder", methods=["GET"])
+    def api_hotfolder():
+        hw = state["hotfolder"]
+        return jsonify(hw.status() if hw is not None else {"watching": False})
+
+    @app.route("/api/hotfolder/start", methods=["POST"])
+    def api_hotfolder_start():
         data = request.get_json(silent=True) or {}
         folder = str(data.get("path", "")).strip()
         if not folder:
@@ -380,37 +561,47 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         fp = Path(folder).expanduser()
         if not fp.is_dir():
             return jsonify({"error": f"Not a directory on the server: {fp}"}), 400
-        if not state["ingest_lock"].acquire(blocking=False):
-            return jsonify({"error": "An ingestion is already running. Please wait."}), 409
-        try:
-            ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            name = str(data.get("name", "")).strip() or fp.name or f"Run {ts}"
-            run_id = db.create(name, folder="")
-            db.update(run_id, folder=f"run{run_id:04d}_{_safe_name(name)}")
-            db.update(run_id, status="ingesting", message="Starting…")
-            state["cancel_event"].clear()
-            state["active_ingest"] = run_id
-            # Ingest the folder in place (do NOT copy into the run dir).
-            threading.Thread(target=_do_ingest, args=(run_id, fp), daemon=True).start()
-            return jsonify({"ok": True, "run_id": run_id})
-        except Exception:
-            state["ingest_lock"].release()
-            raise
+
+        old = state["hotfolder"]
+        if old is not None and old.alive:
+            old.stop()          # one at a time, so a forgotten watch can't linger
+
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        name = str(data.get("name", "")).strip() or fp.name or f"Watch {ts}"
+        run_id = db.create(name, folder="")
+        db.update(run_id, folder=f"run{run_id:04d}_{_safe_name(name)}",
+                  status="queued", message="Watching folder…")
+        state["cancel_event"].clear()
+
+        from .hotfolder import HotFolderWatcher
+        hw = HotFolderWatcher(fp, run_id, _hot_ingest,
+                              scan_interval=float(data.get("scan_interval", 5.0)),
+                              batch_cooldown=float(data.get("cooldown", 20.0)))
+        state["hotfolder"] = hw
+        hw.start()
+        return jsonify({"ok": True, "run_id": run_id, "folder": str(fp)})
+
+    @app.route("/api/hotfolder/stop", methods=["POST"])
+    def api_hotfolder_stop():
+        hw = state["hotfolder"]
+        if hw is None or not hw.alive:
+            return jsonify({"ok": False, "error": "Nothing is being watched."}), 400
+        hw.stop()
+        return jsonify({"ok": True, "run_id": hw.run_id})
 
     @app.route("/api/active")
     def api_active():
-        """Global: is anyone ingesting right now? Polled by every client so the
-        in-progress bar is visible to all users, not just whoever started it."""
-        aid = state["active_ingest"]
-        if aid is None:
+        """Global: is anything being processed right now? Polled by every client
+        so the activity bar is visible to everyone, not just whoever started it.
+
+        Reads the in-memory progress rather than the run's DB status, because a
+        hot-folder batch keeps its run "ready" on purpose and would otherwise
+        never show up here.
+        """
+        prog = state["active_progress"]
+        if prog is None:
             return jsonify({"active": None})
-        row = db.get(int(aid))
-        if not row or row["status"] != "ingesting":
-            return jsonify({"active": None})
-        return jsonify({"active": {
-            "run_id": row["id"], "name": row["name"],
-            "progress": row["progress"], "message": row["message"],
-        }})
+        return jsonify({"active": dict(prog)})
 
     @app.route("/api/cancel_ingest", methods=["POST"])
     def api_cancel_ingest():
@@ -442,9 +633,12 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
 
     @app.route("/api/state")
     def api_state():
+        """``current`` is only a *suggestion* for a client with no run yet — the
+        server no longer has a single selected run."""
         cur = None
-        if state["run_id"] is not None:
-            row = db.get(int(state["run_id"]))
+        rid = _default_run_id()
+        if rid is not None:
+            row = db.get(rid)
             if row:
                 cur = {"id": row["id"], "name": row["name"],
                        "n_images": row["n_images"], "n_bursts": row["n_bursts"]}
@@ -452,16 +646,120 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
 
     @app.route("/api/runs")
     def api_runs():
-        return jsonify({"runs": _runs_payload(),
-                        "current_id": state["run_id"]})
+        return jsonify({"runs": _runs_payload(), "current_id": _default_run_id()})
+
+    @app.route("/api/run/preview_delete")
+    def api_preview_delete():
+        """What deleting this run would actually destroy.
+
+        The UI shows this before asking. The distinction that matters: an
+        uploaded run keeps the ONLY copy of its photos under ``uploads/``, while
+        a watched folder's originals live outside the run and are untouched.
+        """
+        try:
+            run_id = int(request.args.get("run_id", "0"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Bad run_id"}), 400
+        row = db.get(run_id)
+        if not row:
+            return jsonify({"error": "No such run."}), 404
+        run_dir = cfg.runs_dir / row["folder"]
+        uploads = run_dir / "uploads"
+        n_originals, n_bytes = 0, 0
+        if uploads.is_dir():
+            for f in uploads.rglob("*"):
+                if f.is_file():
+                    n_originals += 1
+                    try:
+                        n_bytes += f.stat().st_size
+                    except OSError:
+                        pass
+        total = 0
+        if run_dir.is_dir():
+            for f in run_dir.rglob("*"):
+                if f.is_file():
+                    try:
+                        total += f.stat().st_size
+                    except OSError:
+                        pass
+        return jsonify({
+            "run_id": run_id, "name": row["name"], "status": row["status"],
+            "n_images": row["n_images"], "exists": run_dir.is_dir(),
+            "holds_originals": n_originals > 0,
+            "n_originals": n_originals, "originals_bytes": n_bytes,
+            "total_bytes": total,
+            "busy": (state["active_ingest"] == run_id
+                     or (state["hotfolder"] is not None and state["hotfolder"].alive
+                         and state["hotfolder"].run_id == run_id)),
+        })
+
+    @app.route("/api/delete_run", methods=["POST"])
+    def api_delete_run():
+        """Remove a run: its folder and its registry row. Irreversible."""
+        data = request.get_json(silent=True) or {}
+        try:
+            run_id = int(data.get("run_id", 0))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Bad run_id"}), 400
+        row = db.get(run_id)
+        if not row:
+            return jsonify({"error": "No such run."}), 404
+        # Refuse while something is writing to it — deleting mid-ingest would
+        # leave a half-written tree and a thread writing into nothing.
+        if state["active_ingest"] == run_id:
+            return jsonify({"error": "That run is being processed right now."}), 409
+        hw = state["hotfolder"]
+        if hw is not None and hw.alive and hw.run_id == run_id:
+            return jsonify({"error": "That run is being watched. Stop watching first."}), 409
+
+        run_dir = cfg.runs_dir / row["folder"]
+        # Never delete outside the runs directory, whatever the registry says.
+        try:
+            run_dir.resolve().relative_to(cfg.runs_dir.resolve())
+        except ValueError:
+            return jsonify({"error": "Run folder is outside the runs directory."}), 400
+        removed = False
+        if run_dir.is_dir():
+            shutil.rmtree(run_dir, ignore_errors=True)
+            removed = not run_dir.exists()
+        db.delete(run_id)
+        with runs_lock:
+            runs_cache.pop(run_id, None)
+        return jsonify({"ok": True, "run_id": run_id, "name": row["name"],
+                        "folder_removed": removed})
 
     @app.route("/api/select_run", methods=["POST"])
     def api_select_run():
+        """Validate + warm a run. Selection itself lives in the client from here
+        on, so this changes nothing for anyone else's session."""
         run_id = int((request.get_json(silent=True) or {}).get("run_id")
                      or request.form.get("run_id", 0))
-        if not load_run(run_id):
+        rn = get_run(run_id)
+        if rn is None:
             return jsonify({"error": "Run not found or not ready."}), 404
-        return jsonify({"ok": True, "run_id": run_id})
+        return jsonify({"ok": True, "run_id": run_id, "version": rn.version})
+
+    @app.route("/api/version")
+    def api_version():
+        """Cheap poll: has this run's data moved on since the client loaded it?
+
+        Drives the reload prompt. Returns the run's current generation plus its
+        size, so the client can say how many photos arrived.
+        """
+        raw = request.args.get("run_id")
+        try:
+            run_id = int(raw) if raw not in (None, "") else _default_run_id()
+        except (TypeError, ValueError):
+            run_id = _default_run_id()
+        row = db.get(run_id) if run_id is not None else None
+        if not row:
+            return jsonify({"version": 0, "n_frames": 0, "n_bursts": 0})
+        # Deliberately does NOT load the run: this is polled every couple of
+        # seconds by every open tab, and all it owes them is a number. Reading a
+        # 15 MB matrix to answer "has anything changed?" would be absurd.
+        run_dir = cfg.runs_dir / row["folder"]
+        return jsonify({"run_id": run_id, "version": read_version(run_dir),
+                        "n_frames": int(row["n_images"]), "n_bursts": int(row["n_bursts"])})
 
     # ----------------------------- browse / search
 
@@ -469,25 +767,44 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
     def index():
         return send_file(PACKAGE_DIR / "templates" / "index.html")
 
-    def _run_stats() -> Dict[str, object]:
-        ranked = state["ranked"]
-        bursts = state["bursts"]
-        row = db.get(int(state["run_id"])) if state["run_id"] is not None else None
+    def _run_stats(rn: LoadedRun) -> Dict[str, object]:
+        row = db.get(rn.run_id)
         return {
-            "n_frames": int(len(ranked)),
-            "n_bursts": int(bursts["burst_id"].nunique()),
-            "n_multi": int((bursts["burst_size"] > 1).sum()),
-            "n_starred": int(len(state["stars"])),
+            "n_frames": int(len(rn.ranked)),
+            "n_bursts": int(rn.bursts["burst_id"].nunique()),
+            "n_multi": int((rn.bursts["burst_size"] > 1).sum()),
+            "n_starred": int(len(rn.stars)),
             "run_name": row["name"] if row else "",
-            "run_id": state["run_id"],
+            "run_id": rn.run_id,
+            "version": rn.version,
         }
+
+    def _stale(rn: LoadedRun) -> bool:
+        """True when the client is paginating against a superseded generation.
+
+        Offset-based paging is only coherent within one ordering: if a batch
+        landed since page 1, offset=50 into the NEW ordering would repeat some
+        tiles and skip others. So we refuse and make the client reload.
+        """
+        seen = request.args.get("version")
+        if seen in (None, ""):
+            return False
+        try:
+            return int(seen) != rn.version
+        except (TypeError, ValueError):
+            return False
 
     @app.route("/api/bursts")
     def api_bursts():
-        if state["ranked"] is None:
+        rn = resolve_run()
+        if rn is None:
             return jsonify({"bursts": [], "stats": None,
                             "page": {"offset": 0, "limit": 50, "total_matching": 0}})
-        bursts: pd.DataFrame = state["bursts"]  # type: ignore
+        if _stale(rn):
+            return jsonify({"bursts": [], "stale": True, "version": rn.version,
+                            "stats": _run_stats(rn),
+                            "page": {"offset": 0, "limit": 0, "total_matching": 0}})
+        bursts: pd.DataFrame = rn.bursts
         shot_filter = {s for s in request.args.get("shot", "").split(",") if s}
         subject_filter = request.args.get("subject", "").strip()   # "" | people | stage
         hero_only = request.args.get("hero") in ("1", "true", "yes")
@@ -495,7 +812,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         limit = int(request.args.get("limit", "50"))
 
         df = bursts.copy()
-        rep_shot = _burst_rep_shot_map()
+        rep_shot = _burst_rep_shot_map(rn)
         if rep_shot:
             df = df.assign(_shot=df["burst_id"].map(lambda b: rep_shot.get(int(b), "")))
             if shot_filter:
@@ -510,14 +827,15 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         # Bursts stay collapsed either way — this only changes their order.
         tmin: Dict[int, float] = {}
         if request.args.get("sort") == "time":
-            tmin = _burst_min_times()
+            tmin = _burst_min_times(rn)
         if tmin:
             df = df.assign(_t=df["burst_id"].map(lambda b: tmin.get(int(b), float("nan"))))
             df = df.sort_values(["_t", "burst_rank"], na_position="last")
         else:
             df = df.sort_values("burst_rank")
         df = df.iloc[offset:offset + limit]
-        star_counts = _starred_counts()
+        star_counts = _starred_counts(rn)
+        me = _viewer()
         out: List[Dict[str, object]] = []
         for _, r in df.iterrows():
             out.append({
@@ -531,51 +849,79 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
                 "is_hero": bool(r.get("is_hero", False)),
                 "score_s1": float(r.get("score_s1", 0.0)),
                 "score_s12_after_hard": float(r.get("score_s12_after_hard", 0.0)),
-                "starred": str(r["path"]) in state["stars"],
+                **_star_flags(rn, str(r["path"]), me),
                 "n_starred": int(star_counts.get(int(r["burst_id"]), 0)),
                 "captured_at": _iso(tmin.get(int(r["burst_id"]))) if tmin else "",
             })
-        return jsonify({"bursts": out, "stats": _run_stats(),
+        return jsonify({"bursts": out, "stats": _run_stats(rn), "version": rn.version,
                         "page": {"offset": offset, "limit": limit, "total_matching": int(total)}})
 
     @app.route("/api/stars")
     def api_stars():
         """Every starred path in the loaded run — the client mirrors this set so
         tiles can render their star state without a request per tile."""
-        return jsonify({"starred": sorted(state["stars"]), "count": len(state["stars"])})
+        rn = resolve_run()
+        if rn is None:
+            return jsonify({"mine": [], "others": [], "count": 0, "run_id": None})
+        me = _viewer()
+        mine = sorted(p for p, o in rn.stars.items() if me in o)
+        others = sorted(p for p, o in rn.stars.items() if o - {me})
+        return jsonify({"mine": mine, "others": others,
+                        "count": len(rn.stars), "n_mine": len(mine),
+                        "n_others": len(others), "run_id": rn.run_id})
 
     @app.route("/api/star", methods=["POST"])
     def api_star():
         """Star / unstar one frame. ``{path, starred}`` → the new count."""
-        if state["ranked"] is None:
+        rn = resolve_run()
+        if rn is None:
             return jsonify({"error": "No run selected."}), 400
         data = request.get_json(silent=True) or {}
         path = str(data.get("path", ""))
         want = bool(data.get("starred", True))
         # Only frames belonging to this run may be starred — same trust boundary
         # as image serving, so a stray path can't be written into stars.json.
-        if path not in set(state["ranked"]["path"].astype(str)):
+        if path not in set(rn.ranked["path"].astype(str)):
             return jsonify({"error": "Unknown frame for this run."}), 404
-        with state["stars_lock"]:
+        me = _viewer()
+        with rn.stars_lock:
+            owners = rn.stars.setdefault(path, set())
             if want:
-                state["stars"].add(path)
+                owners.add(me)
             else:
-                state["stars"].discard(path)
-            _save_stars()
-            count = len(state["stars"])
-        return jsonify({"ok": True, "path": path, "starred": want, "count": count})
+                # Only ever removes your own — a colleague's pick is not yours
+                # to delete by clicking the same tile.
+                owners.discard(me)
+            if not owners:
+                rn.stars.pop(path, None)
+            _save_stars(rn)
+            flags = _star_flags(rn, path, me)
+            count = len(rn.stars)
+        return jsonify({"ok": True, "path": path, "count": count, **flags})
 
     @app.route("/api/stars/clear", methods=["POST"])
     def api_stars_clear():
-        """Unstar everything in the loaded run. Stars are shared, so the UI
-        confirms first — this can discard a colleague's picks, not just yours."""
-        if state["ranked"] is None:
+        """Remove YOUR stars from this run. Other people's are never touched.
+
+        There is deliberately no "clear everyone's" — stars are a shared pick
+        list with no undo, and one click that wipes a colleague's work during a
+        live shoot is not a button worth having.
+        """
+        rn = resolve_run()
+        if rn is None:
             return jsonify({"error": "No run selected."}), 400
-        with state["stars_lock"]:
-            cleared = len(state["stars"])
-            state["stars"].clear()
-            _save_stars()
-        return jsonify({"ok": True, "cleared": cleared, "count": 0})
+        me = _viewer()
+        with rn.stars_lock:
+            cleared = 0
+            for path in list(rn.stars):
+                if me in rn.stars[path]:
+                    rn.stars[path].discard(me)
+                    cleared += 1
+                    if not rn.stars[path]:
+                        rn.stars.pop(path, None)
+            _save_stars(rn)
+            count = len(rn.stars)
+        return jsonify({"ok": True, "cleared": cleared, "count": count})
 
     @app.route("/api/starred")
     def api_starred():
@@ -587,12 +933,18 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         offset = int(request.args.get("offset", "0"))
         limit = int(request.args.get("limit", "50"))
         page_empty = {"offset": offset, "limit": limit, "total_matching": 0}
-        ranked = state["ranked"]
-        if ranked is None:
+        rn = resolve_run()
+        if rn is None:
             return jsonify({"bursts": [], "stats": None, "page": page_empty})
+        if _stale(rn):
+            return jsonify({"bursts": [], "stale": True, "version": rn.version,
+                            "stats": _run_stats(rn), "page": page_empty})
+        ranked = rn.ranked
 
-        sub = ranked[ranked["path"].astype(str).isin(state["stars"])].copy()
-        st = _ensure_shot_types()
+        me = _viewer()
+        owner = request.args.get("owner", "all")     # all | mine | others
+        sub = ranked[ranked["path"].astype(str).isin(_paths_for_owner(rn, me, owner))].copy()
+        st = _ensure_shot_types(rn)
         if st is not None and len(sub):
             sub["_shot"] = st[sub.index]
         shot_filter = {s for s in request.args.get("shot", "").split(",") if s}
@@ -606,7 +958,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
 
         total = int(len(sub))
         sizes = ranked.groupby("burst_id").size()
-        ct = _capture_times() if request.args.get("sort") == "time" else None
+        ct = _capture_times(rn) if request.args.get("sort") == "time" else None
         if ct is not None and len(sub):
             sub = sub.assign(_t=ct[sub.index]).sort_values("_t", na_position="last")
         else:
@@ -626,28 +978,40 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
                 "is_hero": bool(r.get("is_hero", False)),
                 "score_s1": float(r.get("score_s1", 0.0)),
                 "score_s12_after_hard": float(r.get("score_s12_after_hard", 0.0)),
-                "starred": True,
+                **_star_flags(rn, str(r["path"]), me),
                 "n_starred": 1,
                 "captured_at": _iso(float(r["_t"])) if "_t" in sub.columns else "",
                 "match_within_burst_rank": int(r.get("within_burst_rank", 1)),
             })
-        return jsonify({"bursts": out, "stats": _run_stats(),
+        return jsonify({"bursts": out, "stats": _run_stats(rn), "version": rn.version,
                         "page": {"offset": offset, "limit": limit, "total_matching": total}})
 
     @app.route("/api/burst/<int:burst_id>")
     def api_burst(burst_id):
-        ranked: pd.DataFrame = state["ranked"]  # type: ignore
-        if ranked is None:
+        rn = resolve_run()
+        if rn is None:
             abort(404)
+        ranked = rn.ranked
         sub = ranked[ranked["burst_id"] == burst_id].copy()
         if sub.empty:
             abort(404)
-        sub = sub.sort_values("within_burst_rank")
-        st = _ensure_shot_types()
+        # Frames within a burst follow the same ordering as the grid by default:
+        # in chronological mode, walking a burst best-first is jarring, because
+        # the strip no longer reads as the sequence the photographer shot.
+        ct = _capture_times(rn)
+        if request.args.get("sort") == "time" and ct is not None:
+            sub = sub.assign(_t=ct[sub.index]).sort_values("_t", na_position="last")
+        else:
+            sub = sub.sort_values("within_burst_rank")
+        me = _viewer()
+        st = _ensure_shot_types(rn)
         shot_by_idx = dict(zip(sub.index, st[sub.index])) if st is not None else {}
+        # captured_at travels with every frame so the viewer can re-sort a burst
+        # without another round trip.
         frames = []
         for idx, r in sub.iterrows():
             frames.append({
+                "captured_at": _iso(float(ct[idx])) if ct is not None else "",
                 "within_burst_rank": int(r["within_burst_rank"]),
                 "is_representative": bool(r["is_representative"]),
                 "filename": r["filename"],
@@ -655,7 +1019,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
                 "shot_type": str(shot_by_idx.get(idx, "")),
                 "score_s1": float(r["score_s1"]),
                 "score_s12_after_hard": float(r["score_s12_after_hard"]),
-                "starred": str(r["path"]) in state["stars"],
+                **_star_flags(rn, str(r["path"]), me),
                 "tech_hard_reject": bool(r.get("tech_hard_reject", False)),
                 "tech_hard_reject_reason": str(r.get("tech_hard_reject_reason", "")),
             })
@@ -667,15 +1031,16 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         offset = int(request.args.get("offset", "0"))
         limit = int(request.args.get("limit", "50"))
         empty_page = {"offset": offset, "limit": limit, "total_matching": 0}
-        if state["ranked"] is None:
+        rn = resolve_run()
+        if rn is None:
             return jsonify({"bursts": [], "page": empty_page, "query": q, "error": "No run selected."})
         if not q:
             return jsonify({"bursts": [], "page": empty_page, "query": q})
-        ranked: pd.DataFrame = state["ranked"]  # type: ignore
-        if state["emb"] is None or len(state["emb"]) != len(ranked):
+        ranked = rn.ranked
+        if rn.emb is None or len(rn.emb) != len(ranked):
             return jsonify({"bursts": [], "page": empty_page, "query": q,
                             "error": "Search index unavailable for this run."})
-        ctx = state["emb_context"] or cfg.features.context_encoder
+        ctx = rn.emb_context or cfg.features.context_encoder
         try:
             with state["search_lock"]:
                 te = _get_text_encoder(ctx)
@@ -684,10 +1049,9 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
             return jsonify({"bursts": [], "page": empty_page, "query": q,
                             "error": f"text encoder unavailable: {exc}"})
 
-        emb: np.ndarray = state["emb"]  # type: ignore
         work = ranked.copy()
-        work["_sim"] = emb @ qvec
-        st = _ensure_shot_types()
+        work["_sim"] = rn.emb @ qvec
+        st = _ensure_shot_types(rn)
         if st is not None:
             work["_shot"] = st
         best = work.loc[work.groupby("burst_id")["_sim"].idxmax()].sort_values("_sim", ascending=False)
@@ -701,7 +1065,8 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         if request.args.get("hero") in ("1", "true", "yes") and "is_hero" in best.columns:
             best = best[best["is_hero"].astype(bool)]
 
-        star_counts = _starred_counts()
+        star_counts = _starred_counts(rn)
+        me = _viewer()
         # Search collapses each burst to its best-matching frame, which may not be
         # the starred one — so "starred" here means "this burst holds a star".
         if request.args.get("starred") in ("1", "true", "yes"):
@@ -726,10 +1091,10 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
                 "score_s12_after_hard": float(r.get("score_s12_after_hard", 0.0)),
                 "relevance": float(r["_sim"]),
                 "match_within_burst_rank": int(r.get("within_burst_rank", 1)),
-                "starred": str(r["path"]) in state["stars"],
+                **_star_flags(rn, str(r["path"]), me),
                 "n_starred": int(star_counts.get(bid, 0)),
             })
-        return jsonify({"bursts": out, "stats": _run_stats(), "query": q,
+        return jsonify({"bursts": out, "stats": _run_stats(rn), "version": rn.version, "query": q,
                         "page": {"offset": offset, "limit": limit, "total_matching": total}})
 
     # ----------------------------- image serving
@@ -753,6 +1118,17 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
     @app.route("/img")
     def img():
         real = _check_allowed(request.args.get("path", ""))
+        from .imaging import is_raw, open_image
+        if is_raw(real):
+            # A browser can't render a .CR3, so serve the embedded preview — which
+            # on modern bodies is full resolution anyway. /download still hands
+            # back the untouched original.
+            buf = io.BytesIO()
+            with open_image(real) as im:
+                im.convert("RGB").save(buf, format="JPEG", quality=92)
+            resp = Response(buf.getvalue(), mimetype="image/jpeg")
+            resp.headers["Cache-Control"] = _CACHE_HDR
+            return resp
         mime, _ = mimetypes.guess_type(str(real))
         resp = send_file(str(real), mimetype=mime or "image/jpeg", conditional=True, max_age=604800)
         resp.headers["Cache-Control"] = _CACHE_HDR
@@ -812,15 +1188,16 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
 
         Body: ``{"scope": "starred"}`` or ``{"paths": [...]}``.
         """
-        if state["ranked"] is None:
+        rn = resolve_run()
+        if rn is None:
             return jsonify({"error": "No run selected."}), 400
         data = request.get_json(silent=True) or {}
         if str(data.get("scope", "")) == "starred":
-            wanted = sorted(state["stars"])
+            wanted = sorted(_paths_for_owner(rn, _viewer(), str(data.get("owner", "all"))))
         else:
             wanted = [str(p) for p in (data.get("paths") or [])]
 
-        known = set(state["ranked"]["path"].astype(str))
+        known = set(rn.ranked["path"].astype(str))
         seen: Set[str] = set()
         paths: List[str] = []
         missing = 0
@@ -836,7 +1213,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
             return jsonify({"error": "Nothing available to download."}), 400
 
         total = sum(Path(p).stat().st_size for p in paths)
-        row = db.get(int(state["run_id"])) if state["run_id"] is not None else None
+        row = db.get(rn.run_id)
         label = _safe_name(row["name"]) if row else "run"
         kind = "starred" if str(data.get("scope", "")) == "starred" else "selection"
         token = secrets.token_urlsafe(18)
@@ -936,7 +1313,8 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         key = (str(real), w)
         hit = _thumb_cache.get(key)
         if hit is None:
-            with Image.open(str(real)) as im:  # context-managed so the FD is closed
+            from .imaging import open_image
+            with open_image(real) as im:  # context-managed so the FD is closed
                 try:
                     im.draft("RGB", (w * 2, w * 2))  # fast partial JPEG decode
                 except Exception:

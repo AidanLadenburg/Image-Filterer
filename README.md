@@ -30,6 +30,8 @@
 | **Star the ones you want** | Click ☆ on any tile or frame. Stars are saved and shared with everyone looking at the same shoot. |
 | **Download** | One photo, your starred set, or a hand-picked selection using select mode |
 | **Resize the grid** | Make thumbnails bigger or smaller with the **Size** control or the `+` / `−` keys. |
+| **Watch a folder** | Point it at a shared folder during a live event and photos are added as they arrive. |
+| **Delete a shoot** | The 🗑 next to the shoot dropdown, with a confirmation that spells out what's removed. |
 
 ---
 
@@ -41,19 +43,43 @@
 
 ### Adding a shoot
 
-Click **＋ Upload folder**. Two options:
+Click **＋ Upload folder**. For a shoot that's already finished:
 
-- **Folder on server** — paste a path that already exists on the machine (or a
-  mounted drive). Nothing is copied and it starts almost immediately. **Use this
-  whenever you can** — it is dramatically faster.
 - **Upload from device** — pick a folder on your own computer. Every photo has
   to cross the network, so a large shoot can take a long time.
 
-Either way a progress bar tracks the work and the shoot loads when it's done.
-Only one shoot can be processed at a time; if someone else is already going,
-you'll see their progress and can wait or cancel.
+If the photos are already on the server (or a mounted drive), use
+[Watch a folder](#watching-a-folder-during-a-live-event) instead and point it at
+the path — nothing is copied, and it works for a finished shoot as well as a live
+one.
 
-> RAW files (CR3, ARW) are **not supported** and get skipped. Export JPEGs.
+A bar at the top tracks the work from the moment it starts, and its **Reload**
+button lights up when the new photos are live. Only one shoot is processed at a
+time; if someone else is already going, you'll see their progress and can wait or
+cancel.
+
+> **RAW works.** CR3, ARW, NEF and friends are read through the preview the
+> camera embeds in them, so they rank and search alongside your JPEGs. If a shot
+> exists as both a RAW *and* a JPEG, the JPEG is used and the RAW skipped, so
+> nothing appears twice. Downloading a RAW gives you the untouched original file.
+
+### Watching a folder during a live event
+
+Instead of uploading at the end, point the system at a folder everyone offloads
+to (a LucidLink mount, a NAS — anything the server can read). Open **＋ Upload
+folder → Watch a folder**, paste the path, and hit **Start watching**.
+
+From then on the photo team just offloads cards as usual. New photos are picked
+up and ranked within a minute or two, and a green bar appears for anyone
+browsing:
+
+> **12 new photos added — some moments may have changed.**  `[Reload]`
+
+**Nothing on your screen moves until you click Reload.** You can keep reviewing
+through the whole event and take the update when it suits you.
+
+A chip in the header shows it's running. Click **Stop watching** when the event
+is over — it also stops itself after a few quiet hours.
 
 ### Starring and downloading
 
@@ -147,8 +173,19 @@ though a version that does is something we'd like to build, so tell us if you'd
 find it useful.
 
 **Can other people see my stars?**
-Yes. Stars are shared by everyone viewing the same shoot, so the team can build
-one pick list together. There's no per-person list, and no undo on **Clear all**.
+Yes — and you can tell them apart. **Your stars are gold, everyone else's are
+blue.** In the starred view, the **All / Mine / Others** buttons narrow it down,
+and the download button follows whichever you've picked.
+
+Starring is per-person: clicking a frame a colleague starred adds your star
+alongside theirs rather than removing it, and **Clear my stars** only ever
+removes yours. There is no way to bulk-delete someone else's picks.
+
+**A green bar says new photos were added. Do I have to reload?**
+No — it waits for you. Until you click it you're looking at a complete, frozen
+view. The one exception is **Load more**: once new photos exist, the button asks
+you to reload first, because paging further would otherwise mix two different
+orderings and skip photos.
 
 **Is the photo I download the full-quality one?**
 Yes, always — the original file, untouched. What you see in the grid and preview
@@ -282,6 +319,34 @@ instead:
 ssh -L 8600:localhost:8600 you@<host>     # then open http://localhost:8600
 ```
 
+### Watching a folder (hot folder)
+
+```
+POST /api/hotfolder/start   {path, name, scan_interval?, cooldown?}
+POST /api/hotfolder/stop
+GET  /api/hotfolder         status
+```
+
+Starting a watch creates a run bound to that folder and re-ingests the **whole
+folder** on each batch — the content cache makes known frames nearly free, and it
+keeps bursts, dedup and ranking correct across the shoot rather than stapling new
+photos onto the end.
+
+**It polls; it does not use inotify.** Filesystem events only fire for writes
+through the local kernel, so a photographer writing from another machine to a
+network or cloud mount generates nothing to listen for. Polling also survives
+inotify queue overflow, which would otherwise drop a photo permanently.
+
+A 5 s scan tracks which files have stopped growing (size + mtime unchanged for
+two ticks, then a decode check); ingestion runs only when something is ready, the
+ingest lock is free, and a cooldown has passed — so 300 files landing at once
+become one pass. The scan eases to 30 s after ten quiet minutes and snaps back on
+first sight of a new file. One watcher at a time; it stops itself after ~6 hours
+idle so a forgotten watch can't poll a cloud mount forever.
+
+Unreadable files (sidecars, RAW without a preview) are remembered as such and not
+re-examined every tick.
+
 ### Behavior under load
 
 - **Ingestion is single-flight.** A second concurrent ingest gets a `409` with a
@@ -290,6 +355,15 @@ ssh -L 8600:localhost:8600 you@<host>     # then open http://localhost:8600
 - **Cancel is cooperative** — the flag is checked between feature chunks and at
   phase boundaries, so it stops within a chunk or two. (A background GPU thread
   can't be safely hard-killed.)
+- **Run selection is per-viewer.** Runs are cached by id, so two people can
+  browse different shoots at once without disturbing each other.
+- **Batches publish atomically.** Outputs are written to temp files and renamed,
+  bracketed by a seqlock in `version.json`; readers take a consistent snapshot or
+  retry, so a re-ingest can run while people browse. Clients send the version
+  they paged from and are told to reload rather than served a mixed ordering.
+- **Content hashes are memoised** on `(path, size, mtime_ns)` in
+  `$CACHE_DIR/sha1_memo.db`. Re-checking a known 3,300-frame folder drops from
+  ~17 s of reads to ~0.02 s — without this, polling a folder is unusable.
 - **Reads scale.** Browsing and search are read-only and run concurrently;
   verified with 8 simultaneous searches. The text encoder is built once and
   shared.
@@ -395,6 +469,7 @@ Each ingested folder becomes a run under `$IMAGE_FILTERER_DATA_ROOT/runs/run0001
 | `search_index.npy` | full-frame embeddings, row-aligned to `ranked.csv` |
 | `stars.json` | starred frame paths (created on first star) |
 | `captured_at.json` | EXIF timestamp cache, backfilled for runs predating the `captured_at` column |
+| `version.json` | generation counter; odd = a write is in flight, even = committed |
 | `config.json` | the exact config used |
 | `uploads/` | the images, for browser uploads only (absent for "folder on server" runs) |
 
@@ -408,18 +483,20 @@ without the UI.
 | `GET /` | the UI |
 | `GET /api/state` · `/api/runs` | current run + all runs |
 | `POST /api/upload/start` · `/chunk` · `/finish` | batched browser upload → creates a run |
-| `POST /api/ingest_path` | `{path, name}` — ingest a folder already on the server |
 | `GET /api/ingest/status?run_id=` | progress for one ingest |
 | `GET /api/active` · `POST /api/cancel_ingest` | the running ingest; cooperative cancel |
 | `POST /api/select_run` | `{run_id}` — load a ready run |
 | `GET /api/bursts?shot=&subject=&hero=&sort=&offset=&limit=` | ranked bursts |
 | `GET /api/burst/<id>` | frames within a burst |
 | `GET /api/search?q=&shot=&subject=&hero=&starred=` | semantic search |
-| `GET /api/stars` · `POST /api/star` · `POST /api/stars/clear` | read / toggle / clear stars |
+| `GET /api/stars?viewer=` · `POST /api/star` · `POST /api/stars/clear` | read / toggle / clear stars (per-viewer) |
+| `GET /api/run/preview_delete?run_id=` · `POST /api/delete_run` | what a delete destroys, then do it |
 | `GET /api/starred?shot=&subject=&hero=&sort=` | starred frames, one entry per frame |
 | `GET /download?path=` | one original, as an attachment |
 | `POST /api/download/prepare` | `{scope:"starred"}` or `{paths:[…]}` → `{token, count, bytes}` |
 | `GET /api/download/zip?token=` | streams the prepared archive |
+| `GET /api/version?run_id=` | cheap poll: generation + counts, drives the reload prompt |
+| `GET /api/hotfolder` · `POST /api/hotfolder/start` · `/stop` | watch a folder |
 | `GET /img` · `GET /thumb?w=` | image bytes (path-allowlisted to the run's tree) |
 
 `shot` is comma-separated multi-select (`wide,medium,close`); `subject` is a
@@ -437,7 +514,13 @@ orders chronologically instead of by rank.
   bytes *and* the sha1 — so the feature cache still hits.
 - **Downloads are path-allowlisted** to the loaded run's tree, the same boundary
   as image serving.
-- **RAW is not supported.** CR3/ARW files are skipped as undecodable.
+- **RAW is read via its embedded preview**, not by demosaicing: ~10 ms per file
+  instead of 1-3 s, and on current bodies the preview is full resolution (an R5
+  Mark II CR3 yields 8192×5464). Needs `rawpy`; without it RAW is reported
+  undecodable and skipped, as before. `X.CR3` alongside `X.JPG` drops the RAW —
+  a filename rule, because content dedup would only *probably* catch the pair.
+  `/img` serves the preview so browsers can display it; `/download` always
+  returns the original file.
 
 ## Project layout
 
@@ -455,6 +538,7 @@ image_filterer/
   scene.py        YOLO person detection → subject + hero tags
   pipeline.py     shared steps: burst columns, search index, CSV writers
   ingest.py       inference-only ingestion of one folder
+  hotfolder.py    polling watcher that folds new arrivals into a live run
   train.py        offline training entry point
   server.py       Flask app + HTTP API
   db.py           SQLite run registry
@@ -474,8 +558,11 @@ docs/             architecture and tuning notes
   outputs are cached, so re-tuning costs nothing but a re-ingest.
 - **Cross-camera moments split.** Two photographers shooting the same gesture
   from different angles produce two bursts.
-- **Stars are global per run.** No per-user lists, and `Clear all` has no undo.
-- **Runs are never garbage-collected.** `RunDB.delete` exists but isn't wired to
-  the UI, and a registry row whose folder was deleted by hand still shows in the
-  dropdown.
+- **Star ownership is per-browser, not per-account.** There's no auth, so "you"
+  is a random id in `localStorage`; clearing site data makes your stars look like
+  someone else's. Stars from before ownership tracking show as unattributed.
+- **A registry row whose folder was deleted by hand** still shows in the
+  dropdown. Deleting through the UI removes both.
+- **Hot folder is poll-based**, so photos appear in a minute or two rather than
+  instantly, and only one folder can be watched at a time.
 - **No authentication.**

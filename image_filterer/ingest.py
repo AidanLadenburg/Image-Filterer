@@ -21,7 +21,8 @@ import pandas as pd
 import torch
 
 from .ranker import load_model, predict, stack_features
-from .pipeline import attach_burst_columns, scan_images, write_bursts_csv, write_search_index
+from .pipeline import (atomic_write, begin_write, commit_write, attach_burst_columns, scan_images,
+                       write_bursts_csv, write_search_index)
 from .technical import combine_stage_scores, reports_to_dicts, technical_scores
 
 from .common import load_or_extract
@@ -135,13 +136,13 @@ def ingest_folder(
         cb(84, "Detecting people / scene…")
         from .cache_io import FeatureCache
         from .scene import SceneAnalyzer, classify_scene
-        from PIL import Image as _Image
+        from .imaging import open_image
         an = SceneAnalyzer(cfg.scene, FeatureCache(cfg.cache_dir),
                            device="0" if device.type == "cuda" else None)
         scene = []
         n = len(bundles)
         for i, b in enumerate(bundles):
-            vec = an.raw(b.sha1, _Image.open(b.path))
+            vec = an.raw(b.sha1, lambda b=b: open_image(b.path))
             subj, hero = classify_scene(vec, cfg.scene)
             scene.append({"subject_class": subj, "is_hero": hero,
                           "person_area": float(vec[0]), "bg_bright": float(vec[3])})
@@ -151,10 +152,25 @@ def ingest_folder(
 
     # Capture time, so the viewer can offer chronological order without having to
     # re-read EXIF for the whole run later. Falls back to mtime when a frame has
-    # no DateTimeOriginal. ~0.3 ms/frame.
+    # no DateTimeOriginal. ~0.3 ms/frame — worth reusing when re-ingesting a
+    # folder we've already seen, which is the hot-folder case.
     from .bursts import read_frame_meta
+    prior_times: Dict[str, str] = {}
+    prev_csv = run_dir / "ranked.csv"
+    if prev_csv.exists():
+        try:
+            prev = pd.read_csv(prev_csv)
+            if "captured_at" in prev.columns:
+                prior_times = {str(k): str(v) for k, v in
+                               zip(prev["path"], prev["captured_at"]) if str(v) and str(v) != "nan"}
+        except Exception:  # noqa: BLE001 — a stale CSV just means we re-read EXIF
+            prior_times = {}
     captured: List[str] = []
     for p in paths:
+        known = prior_times.get(str(p))
+        if known:
+            captured.append(known)
+            continue
         meta = read_frame_meta(p)
         if meta is not None:
             captured.append(meta.captured_at.isoformat(sep=" "))
@@ -192,11 +208,14 @@ def ingest_folder(
     df = attach_burst_columns(df, paths=df["path"].tolist(), cfg=cfg, embeddings=embeddings_map)
 
     cb(94, "Writing outputs…")
-    df.to_csv(run_dir / "ranked.csv", index=False)
+    n_bursts = int(df["burst_id"].nunique())
+    # Seqlock: mark the outputs in flight, write them all, then commit. A viewer
+    # reading concurrently sees the previous generation whole, never a mixture.
+    begin_write(run_dir, n_images=int(len(df)), n_bursts=n_bursts)
+    atomic_write(run_dir / "ranked.csv", lambda t: df.to_csv(t, index=False))
     write_bursts_csv(df, run_dir, cfg)
     write_search_index(run_dir, df, embeddings_map, cfg)
-
-    n_bursts = int(df["burst_id"].nunique())
+    commit_write(run_dir, n_images=int(len(df)), n_bursts=n_bursts)
     skip_note = f"; {n_bad} unreadable skipped" if n_bad else ""
     cb(100, f"Done — {len(df)} images in {n_bursts} bursts{skip_note}.")
     return {"n_images": int(len(df)), "n_bursts": n_bursts, "n_skipped": int(n_bad)}

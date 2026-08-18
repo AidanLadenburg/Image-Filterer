@@ -1,11 +1,54 @@
-"""Image-file hygiene for ingestion: repair a known upload corruption and detect
-files that can't be decoded so a bad file never crashes a whole run."""
+"""Image-file hygiene for ingestion: open any supported file as a PIL image,
+repair a known upload corruption, and detect files that can't be decoded so a
+bad file never crashes a whole run.
+
+RAW files are opened through their **embedded JPEG preview** rather than by
+demosaicing the sensor data. The preview is the camera's own rendering — the
+image the photographer judged on the back of the body — it is full resolution on
+modern bodies, and it costs ~10 ms to pull instead of the 1-3 s a full demosaic
+takes. Nothing downstream needs more: the encoders see a 384 px input and the
+detectors work happily at preview scale.
+"""
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 from PIL import Image
+
+# Extensions handled via the RAW path. Decoding needs `rawpy`; without it these
+# files are reported undecodable and skipped, exactly as they were before.
+RAW_EXTS = {".cr2", ".cr3", ".arw", ".nef", ".raf", ".orf", ".rw2", ".dng"}
+
+
+def is_raw(path) -> bool:
+    return Path(path).suffix.lower() in RAW_EXTS
+
+
+def open_image(path) -> Image.Image:
+    """Open any supported file as an RGB PIL image. Use this, not Image.open().
+
+    Raises whatever the underlying reader raises, so callers can treat failure
+    the same way they always have.
+    """
+    p = Path(path)
+    if not is_raw(p):
+        return Image.open(p)
+    import rawpy  # imported lazily: only RAW shoots need it installed
+
+    with rawpy.imread(str(p)) as raw:
+        try:
+            thumb = raw.extract_thumb()
+        except Exception:  # noqa: BLE001 — no embedded preview; fall back below
+            thumb = None
+        if thumb is not None and thumb.format == rawpy.ThumbFormat.JPEG:
+            return Image.open(io.BytesIO(thumb.data))
+        if thumb is not None:                       # already a bitmap
+            return Image.fromarray(thumb.data)
+        # No usable preview — demosaic at half size. Slow, but it beats losing
+        # the frame entirely.
+        return Image.fromarray(raw.postprocess(half_size=True))
 
 # Leading signatures of formats PIL can decode. Used to (a) detect and strip a
 # few bytes of junk accidentally prepended to an uploaded file, and (b) sanity
@@ -30,8 +73,12 @@ def sanitize_image_file(path, max_lead: int = 8) -> bool:
     bytes, so the sha1 matches the cache again). Returns True if it repaired.
 
     Only ever called on *uploaded copies*, never on server-path originals.
+    RAW containers are left strictly alone: they don't carry any of the magics
+    below, so a chance byte match inside one could only ever truncate a good file.
     """
     p = Path(path)
+    if is_raw(p):
+        return False
     try:
         with open(p, "rb") as f:
             head = f.read(max_lead + 8)
@@ -52,8 +99,15 @@ def sanitize_image_file(path, max_lead: int = 8) -> bool:
 
 
 def is_decodable(path) -> bool:
-    """True if PIL can open + parse the file's structure (cheap; no full decode)."""
+    """True if the file can be opened as an image (cheap; no full decode).
+
+    For RAW this pulls the embedded preview, which is also the honest test: a
+    RAW whose preview can't be read is one we can't ingest.
+    """
     try:
+        if is_raw(path):
+            open_image(path).close()
+            return True
         with Image.open(path) as im:
             im.verify()
         return True
