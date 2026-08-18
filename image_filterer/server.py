@@ -83,6 +83,7 @@ class LoadedRun:
     emb_context: Optional[str] = None
     shot_types: Optional[np.ndarray] = None
     captured: Optional[np.ndarray] = None
+    scores_sorted: Optional[np.ndarray] = None   # for the quality percentile
     stars_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -367,6 +368,40 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         if ts is None or (isinstance(ts, float) and np.isnan(ts)):
             return ""
         return datetime.fromtimestamp(ts).isoformat(sep=" ", timespec="seconds")
+
+    # ----------------------------- quality cutoff
+
+    SCORE_COL = "score_s12_after_hard"
+
+    def _quality_threshold(rn: LoadedRun, top_pct: float) -> Optional[float]:
+        """Score at or above which a frame is in the top ``top_pct`` percent.
+
+        The slider is expressed as a percentile rather than a raw score on
+        purpose: the ranker's output is an ordering, not a measurement — the
+        units are arbitrary and differ between runs — so "top 25%" is the only
+        framing that means the same thing everywhere.
+        """
+        if top_pct >= 100 or top_pct <= 0:
+            return None
+        col = SCORE_COL if SCORE_COL in rn.ranked.columns else "score_s1"
+        if col not in rn.ranked.columns or rn.ranked.empty:
+            return None
+        if rn.scores_sorted is None:
+            rn.scores_sorted = np.sort(rn.ranked[col].to_numpy(dtype=np.float64))
+        return float(np.quantile(rn.scores_sorted, 1.0 - top_pct / 100.0))
+
+    def _top_pct() -> float:
+        try:
+            return max(1.0, min(100.0, float(request.args.get("top_pct", "100"))))
+        except (TypeError, ValueError):
+            return 100.0
+
+    def _score_of(row) -> float:
+        v = row.get(SCORE_COL, row.get("score_s1", 0.0))
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
 
     def _burst_rep_shot_map(rn: LoadedRun) -> Dict[int, str]:
         st = _ensure_shot_types(rn)
@@ -767,11 +802,21 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
     def index():
         return send_file(PACKAGE_DIR / "templates" / "index.html")
 
-    def _run_stats(rn: LoadedRun) -> Dict[str, object]:
+    def _run_stats(rn: LoadedRun, *, visible_bursts=None, thr: Optional[float] = None) -> Dict[str, object]:
         row = db.get(rn.run_id)
+        # How much the quality cutoff actually removed, so "focus on the best"
+        # never silently becomes "most of the shoot is gone".
+        shown_frames = None
+        if thr is not None:
+            col = SCORE_COL if SCORE_COL in rn.ranked.columns else "score_s1"
+            keep = rn.ranked[col] >= thr
+            if visible_bursts is not None:
+                keep = keep & rn.ranked["burst_id"].isin(list(visible_bursts))
+            shown_frames = int(keep.sum())
         return {
             "n_frames": int(len(rn.ranked)),
             "n_bursts": int(rn.bursts["burst_id"].nunique()),
+            "n_frames_shown": shown_frames,
             "n_multi": int((rn.bursts["burst_size"] > 1).sum()),
             "n_starred": int(len(rn.stars)),
             "run_name": row["name"] if row else "",
@@ -812,6 +857,13 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         limit = int(request.args.get("limit", "50"))
 
         df = bursts.copy()
+        # Quality cutoff drops whole moments whose best frame doesn't clear the
+        # bar — a burst represented by a frame you'd never use isn't a moment
+        # worth showing.
+        thr = _quality_threshold(rn, _top_pct())
+        if thr is not None:
+            col = SCORE_COL if SCORE_COL in df.columns else "score_s1"
+            df = df[df[col] >= thr]
         rep_shot = _burst_rep_shot_map(rn)
         if rep_shot:
             df = df.assign(_shot=df["burst_id"].map(lambda b: rep_shot.get(int(b), "")))
@@ -822,6 +874,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         if hero_only and "is_hero" in df.columns:
             df = df[df["is_hero"].astype(bool)]
 
+        df_all_ids = df["burst_id"].tolist()
         total = len(df)
         # sort=time orders bursts by when they were shot rather than by score.
         # Bursts stay collapsed either way — this only changes their order.
@@ -853,7 +906,9 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
                 "n_starred": int(star_counts.get(int(r["burst_id"]), 0)),
                 "captured_at": _iso(tmin.get(int(r["burst_id"]))) if tmin else "",
             })
-        return jsonify({"bursts": out, "stats": _run_stats(rn), "version": rn.version,
+        return jsonify({"bursts": out,
+                        "stats": _run_stats(rn, visible_bursts=set(df_all_ids), thr=thr),
+                        "version": rn.version,
                         "page": {"offset": offset, "limit": limit, "total_matching": int(total)}})
 
     @app.route("/api/stars")
@@ -943,6 +998,9 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
 
         me = _viewer()
         owner = request.args.get("owner", "all")     # all | mine | others
+        # NB: the quality cutoff is deliberately NOT applied here. A star is an
+        # explicit human pick; hiding one because the model scored it low would
+        # be the tool overruling the person. Shot / subject / hero still apply.
         sub = ranked[ranked["path"].astype(str).isin(_paths_for_owner(rn, me, owner))].copy()
         st = _ensure_shot_types(rn)
         if st is not None and len(sub):
@@ -995,6 +1053,13 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         sub = ranked[ranked["burst_id"] == burst_id].copy()
         if sub.empty:
             abort(404)
+        n_all = len(sub)
+        thr = _quality_threshold(rn, _top_pct())
+        if thr is not None:
+            col = SCORE_COL if SCORE_COL in sub.columns else "score_s1"
+            kept = sub[sub[col] >= thr]
+            if not kept.empty:          # never leave a burst with nothing in it
+                sub = kept
         # Frames within a burst follow the same ordering as the grid by default:
         # in chronological mode, walking a burst best-first is jarring, because
         # the strip no longer reads as the sequence the photographer shot.
@@ -1023,7 +1088,8 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
                 "tech_hard_reject": bool(r.get("tech_hard_reject", False)),
                 "tech_hard_reject_reason": str(r.get("tech_hard_reject_reason", "")),
             })
-        return jsonify({"burst_id": burst_id, "frames": frames})
+        return jsonify({"burst_id": burst_id, "frames": frames,
+                        "n_frames_total": n_all, "n_frames_hidden": n_all - len(frames)})
 
     @app.route("/api/search")
     def api_search():
@@ -1065,6 +1131,10 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         if request.args.get("hero") in ("1", "true", "yes") and "is_hero" in best.columns:
             best = best[best["is_hero"].astype(bool)]
 
+        thr = _quality_threshold(rn, _top_pct())
+        if thr is not None:
+            col = SCORE_COL if SCORE_COL in best.columns else "score_s1"
+            best = best[best[col] >= thr]
         star_counts = _starred_counts(rn)
         me = _viewer()
         # Search collapses each burst to its best-matching frame, which may not be

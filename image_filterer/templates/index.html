@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Hero-shot browser</title>
+<title>Image Filterer</title>
 <style>
   :root {
     --bg: #0e0f12; --panel: #16181e; --border: #262a33; --text: #e6e8ee;
@@ -18,9 +18,10 @@
   header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
     padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border);
     position: sticky; top: 0; z-index: 20; }
-  .title { font-weight: 700; font-size: 15px; letter-spacing: .01em; }
-  .title .v { color: var(--accent); }
-  .stats { color: var(--text-dim); font-size: 12px; }
+  .stats { color: var(--text-dim); font-size: 12px;
+    /* No wrapping: the text changes as filters change, and a header that reflows
+       mid-drag is unusable. The slider sits to its LEFT so growth can't push it. */
+    white-space: nowrap; }
   select, input, button { font: inherit; color: var(--text); }
   select, #search-input, #run-name-input {
     background: #14161c; border: 1px solid var(--border); border-radius: 7px;
@@ -57,6 +58,10 @@
   .ctl .zbtn:hover:not(:disabled) { border-color: #3a4152; }
   .ctl .zbtn:disabled { opacity: .35; cursor: default; }
   #zoom-select { padding: 4px 6px; font-size: 12px; }
+  #quality-slider { width: 96px; accent-color: var(--accent2); cursor: pointer; vertical-align: middle; }
+  #quality-label { font-size: 12px; color: var(--text-dim); min-width: 46px; font-family: ui-monospace, monospace; }
+  #quality-ctl.on #quality-label { color: var(--accent2); font-weight: 700; }
+  #quality-ctl.on .shot-label { color: var(--accent2); }
   .search-box { display: inline-flex; align-items: center; gap: 4px; }
   #search-input { width: 260px; max-width: 32vw; }
   #search-clear { cursor: pointer; border: 1px solid var(--border); background: #14161c;
@@ -205,9 +210,13 @@
 <body>
 
 <header>
-  <span class="title">hero-shot <span class="v">browser</span></span>
   <select id="run-select" title="Select an ingested run"></select>
   <button class="btn" id="delete-run" title="Delete this shoot" style="padding:5px 9px">🗑</button>
+  <span class="ctl" id="quality-ctl" title="Hide everything below this quality band">
+    <span class="shot-label">Quality</span>
+    <input type="range" id="quality-slider" min="5" max="100" step="5" value="100" />
+    <span id="quality-label">all</span>
+  </span>
   <span class="stats" id="stats"></span>
   <span class="search-box">
     <input id="search-input" type="search" placeholder="Search…  e.g. “person on stage”" autocomplete="off" spellcheck="false" />
@@ -351,7 +360,9 @@ const state = {
   selectMode: false,       // click selects instead of opening
   selected: new Set(),     // frame paths chosen for a bulk download
   sort: "rank",            // "rank" (best first) | "time" (chronological)
+  topPct: 100,             // quality cutoff: keep the top N% of frames by score
   burstOrder: "rank",      // ordering inside the open burst; defaults to `sort`
+  burstHidden: 0,          // frames in the open burst hidden by the quality cutoff
   burstFrames: [],         // frames of the open burst, re-sorted client-side
   runId: null,             // THIS viewer's shoot — no longer shared server state
   version: null,           // data generation this view was built from
@@ -413,6 +424,9 @@ function buildQuery(offset, limit) {
   if (state.subject) p.set("subject", state.subject);
   if (state.hero) p.set("hero", "1");
   if (state.sort !== "rank") p.set("sort", state.sort);
+  // Starred frames are explicit human picks — the quality cutoff has no business
+  // hiding them. Every other filter still applies there.
+  if (state.topPct < 100 && !state.starredOnly) p.set("top_pct", state.topPct);
   if (state.query) {
     p.set("q", state.query);
     if (state.starredOnly) p.set("starred", "1");
@@ -638,6 +652,9 @@ function updateBar() {
       const any = nStarredTotal();
       big = any ? "No starred frames match these filters" : "Nothing starred yet";
       sub = any ? "" : "Hover a tile and click ☆, or press S while viewing a frame.";
+    } else if (state.topPct < 100) {
+      big = `Nothing in the top ${state.topPct}%`;
+      sub = "Drag the Quality slider right to widen the net.";
     } else big = "No images in this run";
     emptyEl.querySelector(".big").textContent = big;
     emptyEl.querySelector("div:last-child").textContent = sub;
@@ -678,11 +695,21 @@ async function loadPage(reset) {
         await refreshStars();
       }
       state.lastFrames = data.stats.n_frames;
-      $("#stats").innerHTML = state.query
-        ? `<b>${state.total}</b> matches`
-        : state.starredOnly
-          ? `<b>${state.total}</b> starred frame${state.total === 1 ? "" : "s"}`
-          : `<b>${data.stats.n_bursts}</b> bursts · <b>${data.stats.n_frames}</b> images`;
+      const st = data.stats;
+      if (state.query) {
+        $("#stats").innerHTML = `<b>${state.total}</b> matches`;
+      } else if (state.starredOnly) {
+        $("#stats").innerHTML = `<b>${state.total}</b> starred frame${state.total === 1 ? "" : "s"}`;
+      } else if (state.topPct < 100) {
+        // Say plainly what was removed — "focus on the best" should never feel
+        // like photos went missing.
+        const shown = st.n_frames_shown != null ? st.n_frames_shown : "—";
+        $("#stats").innerHTML =
+          `<b style="color:var(--accent2)">${state.total}</b>/${st.n_bursts} moments · ` +
+          `<b style="color:var(--accent2)">${shown}</b>/${st.n_frames} photos`;
+      } else {
+        $("#stats").innerHTML = `<b>${st.n_bursts}</b> bursts · <b>${st.n_frames}</b> images`;
+      }
       paintStars();
     }
   } finally { state.loading = false; updateBar(); }
@@ -698,7 +725,8 @@ async function openModal(burst) {
   $("#modal-bg").classList.add("open");
   const data = await (await fetch(
     `/api/burst/${burst.burst_id}?run_id=${state.runId || ""}&sort=${state.sort}` +
-    `&viewer=${state.viewer}`)).json();
+    `&viewer=${state.viewer}&top_pct=${state.starredOnly ? 100 : state.topPct}`)).json();
+  state.burstHidden = data.n_frames_hidden || 0;
   state.burstFrames = data.frames || [];
   renderStrip(burst);
   updateNav();
@@ -711,7 +739,8 @@ function renderStrip(burst, keepPath) {
   frames.sort(byTime
     ? (a, b) => String(a.captured_at).localeCompare(String(b.captured_at))
     : (a, b) => a.within_burst_rank - b.within_burst_rank);
-  $("#strip-label").textContent = byTime ? "Chronological" : "Best first";
+  $("#strip-label").textContent = (byTime ? "Chronological" : "Best first")
+    + (state.burstHidden ? ` · ${state.burstHidden} hidden` : "");
   $("#strip-toggle").disabled = !frames.some(f => f.captured_at);
 
   const strip = $("#frame-strip"); strip.innerHTML = "";
@@ -937,6 +966,25 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#zoom-select").addEventListener("change", e => setZoom(parseInt(e.target.value, 10)));
   $("#zoom-in").addEventListener("click", () => nudgeZoom(1));
   $("#zoom-out").addEventListener("click", () => nudgeZoom(-1));
+
+  // quality cutoff
+  const qs = $("#quality-slider"); let qt = null;
+  const paintQuality = () => {
+    const v = parseInt(qs.value, 10);
+    $("#quality-label").textContent = v >= 100 ? "all" : `top ${v}%`;
+    $("#quality-ctl").classList.toggle("on", v < 100);
+  };
+  qs.addEventListener("input", () => {            // live label, debounced fetch
+    paintQuality();
+    clearTimeout(qt);
+    qt = setTimeout(() => {
+      const v = parseInt(qs.value, 10);
+      if (v === state.topPct) return;
+      state.topPct = v;
+      loadPage(true);
+    }, 250);
+  });
+  paintQuality();
 
   // sort order — search stays relevance-ordered, so the control is moot there
   $("#sort-select").addEventListener("change", e => {

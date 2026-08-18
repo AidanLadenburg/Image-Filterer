@@ -82,6 +82,12 @@ moment a second body or a card reader renames anything:
   is the next-best per-rig discriminator; this is what `pyexiv2` is for)
 - otherwise → `Make/Model`
 
+RAW files are read through `pyexiv2` rather than PIL, which can't open a CR3 at
+all — and the embedded JPEG preview we decode them through carries no
+`DateTimeOriginal`. Without `pyexiv2` a RAW frame gets no timestamp and becomes
+its own single-frame burst, which is why it is a required dependency rather than
+an optional one.
+
 Within one camera, consecutive frames merge when:
 
 ```

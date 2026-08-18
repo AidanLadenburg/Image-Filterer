@@ -29,6 +29,7 @@
 | **Open a moment** | Click a tile to see every frame in that burst, ordered best-first, and step through with ← / →. |
 | **Star the ones you want** | Click ☆ on any tile or frame. Stars are saved and shared with everyone looking at the same shoot. |
 | **Download** | One photo, your starred set, or a hand-picked selection using select mode |
+| **Quality slider** | Hide everything below a chosen band so only the strongest photos remain. |
 | **Resize the grid** | Make thumbnails bigger or smaller with the **Size** control or the `+` / `−` keys. |
 | **Watch a folder** | Point it at a shared folder during a live event and photos are added as they arrive. |
 | **Delete a shoot** | The 🗑 next to the shoot dropdown, with a confirmation that spells out what's removed. |
@@ -141,6 +142,16 @@ person in it.
 foreground. "Stage" means an empty stage, a distant crowd, or a slide — no clear
 main subject.
 
+**Quality slider** — "top 25%" means the strongest quarter of the shoot by the
+system's own ranking, not a measure of sharpness or exposure. It hides weaker
+frames *inside* bursts too, so a burst of 61 can show its best 3. The header
+always says what survived — `159/733 moments · 332/3316 photos` — and a burst
+never empties completely; its best frame always stays.
+
+**The slider never hides a starred frame.** ★ Starred always shows everything
+you or the team picked, however low the model scored it — the other filters still
+apply there.
+
 **Relevance** — only appears when you search. How well that photo matches the
 words you typed. Search results are ordered by this instead of by rank.
 
@@ -216,6 +227,11 @@ browser page, you can stop here.**
   hours. Developed on an RTX A6000.
 - **~5 GB disk** for model weights and the feature cache; the cache grows about
   **25 MB per 1,000 images**.
+
+Two dependencies are worth knowing about, both installed by `pip install -e .`:
+`rawpy` reads RAW files via their embedded preview, and `pyexiv2` supplies the
+EXIF that PIL won't — RAW capture times and the Sony lens model. Without
+`pyexiv2` every RAW frame lands in its own single-frame burst.
 
 ## Setup
 
@@ -454,6 +470,7 @@ checkpoint keeps scoring correctly even after config changes.
 | **Shot** | wide / medium / close | Zero-shot SigLIP2 wide↔close axis. This is *framing scale*, not face size. |
 | **Subject** | people / stage | Largest YOLO person box vs. frame area. |
 | **★ Hero** | on / off | One dominant person, no second prominent person, clean dark background. |
+| **Quality** | top N% | Percentile of `score_s12_after_hard` over the run. A percentile rather than a raw score because the ranker's units are arbitrary and differ per run. Applies to bursts, frames within a burst and search hits — but **not** to `/api/starred`, where a human pick outranks the model's opinion. |
 | **Sort** | rank / time | Rank uses the burst representative's score; time uses EXIF `DateTimeOriginal` (falling back to mtime), cached per run. |
 
 All of them AND together, and all combine with search.
@@ -501,7 +518,8 @@ without the UI.
 
 `shot` is comma-separated multi-select (`wide,medium,close`); `subject` is a
 single value (`people`\|`stage`); `hero=1` restricts to hero shots; `sort=time`
-orders chronologically instead of by rank.
+orders chronologically instead of by rank; `top_pct=N` keeps only the strongest
+N% of frames (clamped to 1–100).
 
 ## Robustness
 
