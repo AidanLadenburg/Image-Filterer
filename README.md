@@ -286,6 +286,7 @@ checkout, a container, or an install. All are optional.
 | `IMAGE_FILTERER_ASSET_DIR` | `$IMAGE_FILTERER_DATA_ROOT/assets` | Third-party weights |
 | `IMAGE_FILTERER_MODEL_PATH` | `image_filterer/model/ranker.pt` | The production ranker |
 | `IMAGE_FILTERER_TRAIN_ROOT` | `./dataset` | Labeled data, training only |
+| `IMAGE_FILTERER_PASSWORD` | unset (no auth) | Shared password gating the whole server — see [Authentication](#authentication) |
 
 Run storage deliberately defaults **outside the repo** so that git operations,
 cleanups, or a `rm -rf` in the working tree can never destroy live runs. In
@@ -329,6 +330,29 @@ instead:
 ```bash
 ssh -L 8600:localhost:8600 you@<host>     # then open http://localhost:8600
 ```
+
+### Authentication
+
+There's no authentication by default — anyone with the link can browse and
+star. To require a password:
+
+```bash
+export IMAGE_FILTERER_PASSWORD=whatever-you-want
+image-filterer-server --host 0.0.0.0 --port 8600
+```
+
+Every route is gated except the login page itself; unauthenticated requests to
+`/` get a login form and everything else gets a `401`. A session lasts 18
+hours (covers a full event day) and survives server restarts — the signing
+key is written once to `$IMAGE_FILTERER_DATA_ROOT/.session_secret`.
+
+This is one shared password for everyone, not per-user accounts — it's meant
+to keep the link from being useful to someone who doesn't have it, not to
+tell people apart. That's still done by the existing per-browser id: the
+login form and the **Set your name** button in the header both write to it,
+and once set, a display name shows up wherever a frame lists who starred it.
+There's no server-side verification that a name is who it claims — anyone can
+type any name, same trust model as the shared password.
 
 ### Watching a folder (hot folder)
 
@@ -387,8 +411,10 @@ re-examined every tick.
   don't compress) and streamed, so a multi-GB archive costs almost no memory.
 
 For heavier load, put it behind gunicorn and a reverse proxy — the app factory is
-`image_filterer.server:create_app`. **There is no authentication**; the service
-assumes a trusted network. Add auth at the proxy if you expose it.
+`image_filterer.server:create_app`. **Authentication is a single shared
+password**, off by default — see [Authentication](#authentication). It isn't a
+substitute for a real access-controlled network; add auth at the proxy too if
+you expose this beyond a trusted LAN.
 
 ## Training a model
 
@@ -571,11 +597,14 @@ docs/             architecture and tuning notes
   outputs are cached, so re-tuning costs nothing but a re-ingest.
 - **Cross-camera moments split.** Two photographers shooting the same gesture
   from different angles produce two bursts.
-- **Star ownership is per-browser, not per-account.** There's no auth, so "you"
-  is a random id in `localStorage`; clearing site data makes your stars look like
-  someone else's. Stars from before ownership tracking show as unattributed.
+- **Star ownership is per-browser, not per-account.** "You" is a random id in
+  `localStorage`, optionally labeled with a display name; clearing site data
+  makes your stars look like someone else's. Stars from before ownership
+  tracking show as unattributed.
 - **A registry row whose folder was deleted by hand** still shows in the
   dropdown. Deleting through the UI removes both.
 - **Hot folder is poll-based**, so photos appear in a minute or two rather than
   instantly, and only one folder can be watched at a time.
-- **No authentication.**
+- **Authentication is one shared password, off by default.** It keeps the link
+  from being useful to a stranger; it does not distinguish or verify who's who
+  (display names are self-reported) and there is no per-action authorization.

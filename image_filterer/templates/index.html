@@ -252,6 +252,7 @@
     <span class="hf-dot"></span><span id="hf-text">watching</span>
   </span>
   <button class="btn primary" id="btn-upload">＋ Upload folder</button>
+  <button class="btn" id="name-pill" title="Set the name attached to stars you make">Set your name</button>
 </header>
 
 <!-- One bar for the whole lifecycle: appears the moment work starts, tracks it,
@@ -353,8 +354,10 @@ const state = {
   // No accounts here, so "you" is a random id kept in this browser. It is only
   // ever used to tell your stars apart from everyone else's.
   viewer: null,
+  displayName: "",         // optional, shown to others via starred_by
   starsMine: new Set(),    // starred by you
   starsOthers: new Set(),  // starred by anyone else
+  starNames: {},           // path -> display names of everyone who starred it
   starOwner: "all",        // starred view: all | mine | others
   openFrame: null,         // frame shown in the modal — target of the S shortcut
   selectMode: false,       // click selects instead of opening
@@ -409,6 +412,23 @@ function nudgeZoom(dir) {
   if (next !== zoomPct) setZoom(next);
 }
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+
+function renderNamePill() {
+  const el = $("#name-pill");
+  if (!el) return;
+  el.textContent = state.displayName ? `You: ${state.displayName}` : "Set your name";
+}
+async function setDisplayName(name) {
+  state.displayName = name;
+  try { localStorage.setItem("displayName", name); } catch (e) {}
+  renderNamePill();
+  if (state.viewer) {
+    try {
+      await fetch("/api/name", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ viewer: state.viewer, name }) });
+    } catch (e) {}
+  }
+}
 
 function buildQuery(offset, limit) {
   const p = new URLSearchParams();
@@ -565,7 +585,9 @@ function paintStars() {
                             : "☆ Star this frame";
     } else {
       el.textContent = (mine || other) ? "★" : "☆";
-      el.title = mine ? "Starred by you" : other ? "Starred by someone else" : "Star this frame";
+      const names = (state.starNames[p] || []).filter(n => n && n !== state.displayName);
+      const who = names.length ? ` (${names.join(", ")})` : "";
+      el.title = mine ? `Starred by you${who}` : other ? `Starred by someone else${who}` : "Star this frame";
     }
   });
   const n = state.starsMine.size + [...state.starsOthers].filter(p => !isMine(p)).length;
@@ -578,6 +600,7 @@ function renderTiles(bursts, append) {
   const grid = $("#grid");
   if (!append) grid.innerHTML = "";
   for (const b of bursts) {
+    if (b.starred_by) state.starNames[b.rep_path] = b.starred_by;
     const tile = document.createElement("div");
     tile.className = "tile";
     // Other frames of this burst that are starred but aren't the one on show.
@@ -746,6 +769,7 @@ function renderStrip(burst, keepPath) {
   const strip = $("#frame-strip"); strip.innerHTML = "";
   const rows = [];
   frames.forEach(f => {
+    if (f.starred_by) state.starNames[f.path] = f.starred_by;
     const row = document.createElement("div");
     row.className = "frame-row" + (f.is_representative ? " representative" : "");
     row.innerHTML = `
@@ -1266,6 +1290,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       localStorage.setItem("viewerId", state.viewer);
     }
   } catch (e) { state.viewer = "anon"; }
+
+  try { state.displayName = localStorage.getItem("displayName") || ""; } catch (e) {}
+  renderNamePill();
+  $("#name-pill").addEventListener("click", () => {
+    const name = prompt("Your name (shown on stars you make):", state.displayName);
+    if (name === null) return;
+    setDisplayName(name.trim().slice(0, 40));
+  });
 
   // init — this viewer's last shoot wins over the server's suggestion, so two
   // people on the same server keep their own selections across refreshes.

@@ -26,9 +26,16 @@ cache/
 assets/
 dataset/
 *.db
+.session_secret
+viewer_names.json
 
 # Editor / OS
 .DS_Store
 .idea/
 .vscode/
 *.swp
+
+# Machine-specific launcher — hardcodes this checkout's absolute path, so it
+# won't work from a clone on someone else's machine. start.sh is the portable
+# part and stays tracked.
+/*.desktop

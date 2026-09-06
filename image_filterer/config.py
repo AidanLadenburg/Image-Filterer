@@ -18,6 +18,8 @@ from a checkout, a container, or an install:
                                  (default ``image_filterer/model/ranker.pt``)
 ``IMAGE_FILTERER_ASSET_DIR``     third-party weights: FaRL, YuNet, YOLO
                                  (default ``$IMAGE_FILTERER_DATA_ROOT/assets``)
+``IMAGE_FILTERER_PASSWORD``      shared password gating the server
+                                 (default unset — auth disabled)
 ===============================  ==============================================
 
 The feature cache is keyed by ``(sha1, kind, encoder_id)``, so it is safe to
@@ -247,6 +249,16 @@ class Config:
     @property
     def model_path(self) -> Path:
         return Path(os.environ.get("IMAGE_FILTERER_MODEL_PATH", str(PACKAGE_DIR / "model" / "ranker.pt")))
+
+    @property
+    def password(self) -> Optional[str]:
+        """Shared password gating the whole server. Unset = auth disabled.
+
+        There are no accounts — this is one password for anyone with the
+        link, meant to keep randoms off a link shared at a live event, not to
+        distinguish who's who (that's the separate per-browser viewer id).
+        """
+        return os.environ.get("IMAGE_FILTERER_PASSWORD") or None
 
     def ensure_dirs(self) -> None:
         self.runs_dir.mkdir(parents=True, exist_ok=True)

@@ -350,7 +350,9 @@ def save_model(path: Path, model: RankNet, cfg: RankerConfig, in_dim: int, meta:
 
 
 def load_model(path: Path, device: torch.device) -> Tuple[RankNet, Dict, Dict]:
-    blob = torch.load(path, map_location=device)
+    # The checkpoint stores non-tensor fields (config, meta), so it needs the
+    # full unpickler; torch>=2.6 defaults weights_only=True and would refuse it.
+    blob = torch.load(path, map_location=device, weights_only=False)
     cfg_dict = blob["config"]
     in_dim = int(blob["in_dim"])
     cfg = RankerConfig(**cfg_dict)

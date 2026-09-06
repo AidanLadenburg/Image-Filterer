@@ -8,14 +8,38 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
+import uuid
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
+
+
+def _atomic_write(path: Path, write) -> None:
+    """Write via a temp file in the same directory, then rename into place.
+
+    The cache is documented as shareable across machines, i.e. read
+    concurrently by other ingests/hot-folder polls/training runs. A direct
+    write leaves a window where a reader loads a truncated ``.npz`` or
+    ``.json``; ``os.replace`` is atomic on POSIX, so a reader sees either the
+    old file or the new one, never a partial one. The temp name is
+    per-call-unique so concurrent writers of the same entry never collide.
+    """
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        write(tmp)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 def file_sha1(path: Path, chunk: int = 1 << 20) -> str:
@@ -143,13 +167,20 @@ class FeatureCache:
         arrays: Dict[str, np.ndarray],
         encoder_id: str = "none",
     ) -> None:
-        np.savez_compressed(self._entry_path(sha1, kind, encoder_id), **arrays)
+        def _write(tmp: Path) -> None:
+            # np.savez_compressed appends ".npz" to any filename that lacks
+            # it, which would silently write past the atomic-rename target.
+            # A file handle bypasses that extension-guessing entirely.
+            with open(tmp, "wb") as f:
+                np.savez_compressed(f, **arrays)
+
+        _atomic_write(self._entry_path(sha1, kind, encoder_id), _write)
 
     # --- side-channel: per-image scalar metadata that is cheap to recompute ---
 
     def save_meta(self, sha1: str, kind: str, payload: Dict[str, Any]) -> None:
         path = self._entry_dir(sha1) / f"{sha1}.{kind}.meta.json"
-        path.write_text(json.dumps(payload))
+        _atomic_write(path, lambda tmp: tmp.write_text(json.dumps(payload)))
 
     def load_meta(self, sha1: str, kind: str) -> Optional[Dict[str, Any]]:
         path = self._entry_dir(sha1) / f"{sha1}.{kind}.meta.json"

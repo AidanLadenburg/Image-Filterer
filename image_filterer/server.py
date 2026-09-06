@@ -25,7 +25,7 @@ import time
 import zipfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 try:
     import resource  # Unix only
@@ -36,7 +36,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
-from flask import Flask, Response, abort, jsonify, request, send_file
+from flask import Flask, Response, abort, jsonify, request, send_file, session
 
 from PIL import Image
 
@@ -55,6 +55,27 @@ class _Cancelled(Exception):
 def _safe_name(name: str) -> str:
     s = re.sub(r"[^A-Za-z0-9._-]+", "-", name.strip()).strip("-")
     return s[:60] or "run"
+
+
+def _load_or_create_secret(cfg: Config) -> bytes:
+    """Signing key for the login session cookie, persisted across restarts.
+
+    A fresh random key on every process start would silently log everyone out
+    of a live event whenever the server is restarted (a redeploy, a crash
+    recovery). Keeping it on disk means a restart mid-keynote doesn't cost
+    anyone their session.
+    """
+    path = cfg.data_root / ".session_secret"
+    if path.exists():
+        return path.read_bytes()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    secret = secrets.token_bytes(32)
+    path.write_bytes(secret)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return secret
 
 
 @dataclass
@@ -93,6 +114,88 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
     db = RunDB(cfg.db_path)
 
     app = Flask(__name__, template_folder=str(PACKAGE_DIR / "templates"))
+    app.secret_key = _load_or_create_secret(cfg)
+    # Long enough to cover a full event day without re-prompting; short enough
+    # that a lost/shared laptop isn't logged in forever.
+    app.permanent_session_lifetime = timedelta(hours=18)
+
+    # Display names are opt-in and keyed by the same per-browser viewer id
+    # stars already use, so "attach a name" doesn't need real accounts. Global
+    # (not per-run) — the same person keeps their name across shoots.
+    names_path = cfg.data_root / "viewer_names.json"
+    names_lock = threading.Lock()
+    try:
+        viewer_names: Dict[str, str] = json.loads(names_path.read_text())
+    except Exception:  # noqa: BLE001 — a corrupt/missing file just starts empty
+        viewer_names = {}
+
+    def _save_names() -> None:
+        tmp = names_path.with_name(names_path.name + ".tmp")
+        tmp.write_text(json.dumps(viewer_names, indent=1))
+        tmp.replace(names_path)
+
+    def _set_name(viewer: str, name: str) -> None:
+        name = name.strip()[:40]
+        if not viewer:
+            return
+        with names_lock:
+            if name:
+                viewer_names[viewer] = name
+            else:
+                viewer_names.pop(viewer, None)
+            _save_names()
+
+    def _display_name(viewer: str) -> str:
+        return viewer_names.get(viewer, viewer)
+
+    # ----------------------------- auth
+    #
+    # One shared password for the whole server, not per-user accounts — the
+    # trust model is "anyone with the link is trustworthy," this just keeps
+    # the link from being useful to someone who doesn't have it. Every route
+    # is gated except the login endpoint itself; unauthenticated hits to the
+    # page get a login form, everything else gets a 401.
+
+    LOGIN_TEMPLATE = PACKAGE_DIR / "templates" / "login.html"
+
+    @app.before_request
+    def _require_auth():
+        if not cfg.password:
+            return None
+        if request.path == "/login" or request.method == "OPTIONS":
+            return None
+        if session.get("authed"):
+            return None
+        if request.path == "/":
+            return send_file(LOGIN_TEMPLATE)
+        return jsonify({"error": "unauthorized"}), 401
+
+    @app.route("/login", methods=["POST"])
+    def login():
+        if not cfg.password:
+            return jsonify({"ok": True})
+        data = request.get_json(silent=True) or {}
+        if not secrets.compare_digest(str(data.get("password", "")), cfg.password):
+            return jsonify({"ok": False, "error": "Wrong password."}), 401
+        session.permanent = True
+        session["authed"] = True
+        viewer = str(data.get("viewer") or "")
+        name = str(data.get("name") or "")
+        if viewer and name:
+            _set_name(viewer, name)
+        return jsonify({"ok": True})
+
+    @app.route("/api/name", methods=["POST"])
+    def api_name():
+        """Set/change the display name attached to this browser's viewer id."""
+        data = request.get_json(silent=True) or {}
+        viewer = str(data.get("viewer") or "")
+        if not viewer:
+            return jsonify({"error": "Missing viewer id."}), 400
+        name = str(data.get("name") or "")
+        _set_name(viewer, name)
+        return jsonify({"ok": True, "name": name})
+
     # Per-run cache. Small: a run is a CSV plus a ~15 MB embedding matrix, and
     # holding a few lets several viewers browse different shoots concurrently.
     runs_cache: "OrderedDict[int, LoadedRun]" = OrderedDict()
@@ -157,11 +260,12 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
     def _star_owners(rn: LoadedRun, path: str) -> Set[str]:
         return rn.stars.get(str(path), set())
 
-    def _star_flags(rn: LoadedRun, path: str, me: str) -> Dict[str, bool]:
+    def _star_flags(rn: LoadedRun, path: str, me: str) -> Dict[str, object]:
         owners = _star_owners(rn, path)
         return {"starred": bool(owners),
                 "starred_mine": me in owners,
-                "starred_others": bool(owners - {me})}
+                "starred_others": bool(owners - {me}),
+                "starred_by": sorted(_display_name(o) for o in owners)}
 
     def _paths_for_owner(rn: LoadedRun, me: str, owner: str) -> Set[str]:
         """Starred paths filtered to all / just mine / just other people's."""
@@ -1483,6 +1587,11 @@ def main() -> None:
     app = create_app(cfg)
     ip = _primary_ip() if listens_all else args.host
     print(f"Image Filterer (model={cfg.model_path.name})")
+    if cfg.password:
+        print("  auth:   password required (set IMAGE_FILTERER_PASSWORD to change)")
+    else:
+        print("  auth:   NONE — anyone with the link can browse and edit. "
+              "Set IMAGE_FILTERER_PASSWORD before sharing this.")
     print(f"  data:   {cfg.data_root}   (set IMAGE_FILTERER_DATA_ROOT to change)")
     print(f"  local:  http://127.0.0.1:{args.port}/")
     if listens_all:
