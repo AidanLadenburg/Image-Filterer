@@ -89,7 +89,7 @@ def main():
     else:
         password = os.environ.get("IMAGE_FILTERER_PASSWORD", "")
         if not password or password == "replace-with-your-event-password":
-            raise RuntimeError("Set a real IMAGE_FILTERER_PASSWORD in .env.spark.")
+            raise RuntimeError("Set a real IMAGE_FILTERER_PASSWORD before starting the server.")
         from scripts.fetch_assets import ASSETS
         from image_filterer.config import asset_dir
         missing = [name for sub, name, _ in ASSETS if not (asset_dir() / sub / name).is_file()]

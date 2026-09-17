@@ -301,6 +301,14 @@ Use this installation path on DGX Spark instead of the CUDA 12.1 / native venv
 example above. `start.sh` remains the native launcher; **`start-spark.sh` is the
 Docker launcher**. Run the commands below from the repository root.
 
+The application has the same features in a native deployment. Native mode sees
+host paths directly, so the watcher UI can use a local, LucidLink, or NAS path
+without a Docker mount setting, and `start.sh` prompts for the event password.
+Docker is recommended on DGX Spark because NVIDIA's ARM64/Blackwell PyTorch and
+TorchVision builds are already matched in the base image and remain isolated
+from the host. If a compatible native GPU environment is already installed, the
+regular setup and launcher are a simpler valid option.
+
 The image starts from NVIDIA's ARM64 PyTorch `25.11-py3` image, also used in
 [NVIDIA's Spark playbook](https://github.com/NVIDIA/dgx-spark-playbooks/blob/main/nvidia/pytorch-fine-tune/assets/docker-compose.yml).
 It preserves that image's exact Torch and TorchVision versions during installation
@@ -311,7 +319,7 @@ event day. You can pin `SPARK_BASE_IMAGE` to a validated image digest as well.
 
 **Validation status:** this deployment recipe must pass the checks below on your
 Spark before live use. Repository tests alone do not validate ARM64 native
-libraries, Blackwell inference, or your LucidLink mount.
+libraries, Blackwell inference, or a mounted photo source.
 
 ### 1. Prepare the host and configuration
 
@@ -330,11 +338,11 @@ id -g
 
 Edit `.env.spark`:
 
-- Set a real `IMAGE_FILTERER_PASSWORD` (single-quote it to preserve literal `$`).
-- Set `LUCIDLINK_PATH` to the **absolute host path** of the mounted event folder.
 - Set `SPARK_DATA_DIR` to an **absolute directory on the Spark's local SSD**.
 - Set `SPARK_UID` and `SPARK_GID` to the numeric IDs printed above. This account
-  must be able to read LucidLink and write the local data directory.
+  must be able to write the local data directory.
+- To watch an existing folder, set `PHOTO_SOURCE_PATH` to its **absolute host
+  path**. It can be a local directory, a LucidLink mount, or a mounted NAS/share.
 - Optionally change the host port (`SPARK_PORT`, default 8600) or listening IP.
 
 Create the local directory yourself, owned by that account, for example:
@@ -345,17 +353,26 @@ mkdir -p /home/YOUR_USER/image-filterer-data
 
 Use that exact path in `SPARK_DATA_DIR`. Docker deliberately refuses to create
 missing bind-mount source directories, helping catch typos. Do not put the
-application database or caches on LucidLink. `.env.spark` is ignored by Git and
-excluded from the image build context; it contains your shared password.
+application database or caches on a network mount. This directory preserves the
+registry, rankings, stars, browser uploads, model downloads, feature cache, and
+HTTPS/session state when the container is replaced. `.env.spark` is ignored by
+Git and excluded from the image build context; it contains machine paths, not the
+event password.
 
-**Mount LucidLink before running setup or starting the container.** Docker exposes
-that folder read-only at `/photos`. LucidLink/FUSE permissions must permit access
-from the configured container UID; a successful host `ls` alone does not prove
-container access. Follow your LucidLink administrator's supported mount/access
-configuration if permission is denied. Avoid changing mount permissions blindly.
-If LucidLink is unmounted/remounted, recreate the container afterward with
+`PHOTO_SOURCE_PATH` is optional. Without it, `/photos` is an empty placeholder
+and **Upload from device** still works: the browser sends those photos into
+`SPARK_DATA_DIR`. With it, Docker exposes the chosen directory read-only at
+`/photos`, because the watcher UI can select only paths already visible inside
+the container. For a large library, mount its stable root and choose an
+event-specific subfolder in the UI. The configured UID must be able to read it.
+
+Mount a network source before starting the container. LucidLink/FUSE permissions
+must permit access from the configured container UID; a successful host `ls`
+alone does not prove container access. Follow your storage administrator's
+supported mount/access configuration if permission is denied. If a source is
+unmounted or remounted, recreate the container afterward with
 `bash start-spark.sh up --force-recreate`. A container restart policy does not
-wait for LucidLink to mount after a host reboot.
+wait for a network mount after a host reboot.
 
 ### 2. Build, download models, and test inference
 
@@ -370,7 +387,8 @@ It also checks CUDA matrix operations and TorchVision's CUDA NMS extension.
 Downloads persist under `SPARK_DATA_DIR`, including the Hugging Face cache.
 Internet access is needed for the build and initial downloads.
 
-Then test actual files from the LucidLink mount (container paths, not host paths):
+If using a mounted photo source, test actual files from it using container paths,
+not host paths:
 
 ```bash
 bash start-spark.sh check --sample '/photos/example-person.jpg'
@@ -396,6 +414,13 @@ bash start-spark.sh status
 bash start-spark.sh logs
 ```
 
+`up` asks for the shared event password twice and passes it to the container
+without saving it to disk. For unattended startup, provide it in the process
+environment instead: `IMAGE_FILTERER_PASSWORD='...' bash start-spark.sh up`.
+Docker retains the value in the created container configuration, so its
+`unless-stopped` restart policy still works after a reboot. Recreating the
+container asks for the password again.
+
 Open **`https://SPARK_LAN_IP:8600`** from viewers' computers (or your configured
 host port). HTTPS uses the app's self-signed certificate; browsers will need to
 accept/trust it. For a managed deployment, use a trusted certificate/reverse
@@ -404,15 +429,20 @@ container does not modify the host firewall. Configure Docker-published-port
 access at the host/network level rather than assuming a UFW rule alone restricts
 Docker traffic.
 
-In **Watch a folder**, enter **`/photos`**, or a subfolder such as
-`/photos/day-one`. Files copied into LucidLink by photographers appear through
-this mount and are picked up by the watcher. The browser upload feature creates
-separate shoots and is not needed for this workflow.
+There are two ways to add photos:
+
+- To use files already accessible to the Spark, configure `PHOTO_SOURCE_PATH`.
+  In **Watch a folder**, enter **`/photos`** or a subfolder such as
+  `/photos/day-one`. This works for a local folder, LucidLink, or another
+  mounted network share.
+- To send files from another computer through the web app, leave
+  `PHOTO_SOURCE_PATH` unset and choose **Upload from device**. These copies are
+  stored under `SPARK_DATA_DIR`; the watcher and `/photos` are not involved.
 
 This Compose deployment runs **one application container**. Do not scale it:
 watchers and ingestion locks are process-local. The container runs as your
 configured UID rather than root. Local storage persists across rebuilds and
-`down`; the LucidLink originals are mounted read-only.
+`down`; originals exposed through `PHOTO_SOURCE_PATH` are mounted read-only.
 
 ```bash
 bash start-spark.sh down                  # stop; keep local data and models

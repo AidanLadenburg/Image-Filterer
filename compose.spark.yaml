@@ -13,7 +13,7 @@ services:
     ports:
       - "${SPARK_BIND_IP:-0.0.0.0}:${SPARK_PORT:-8600}:8600"
     environment:
-      IMAGE_FILTERER_PASSWORD: ${IMAGE_FILTERER_PASSWORD:?Set IMAGE_FILTERER_PASSWORD in .env.spark}
+      IMAGE_FILTERER_PASSWORD: ${IMAGE_FILTERER_PASSWORD:-}
     volumes:
       - type: bind
         source: ${SPARK_DATA_DIR:?Set SPARK_DATA_DIR in .env.spark}
@@ -21,7 +21,7 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: ${LUCIDLINK_PATH:?Set LUCIDLINK_PATH in .env.spark}
+        source: ${PHOTO_SOURCE_PATH:-./deploy/spark/empty-photo-source}
         target: /photos
         read_only: true
         bind:
