@@ -111,6 +111,7 @@ class HotFolderWatcher:
         # Files we've tried and can't use. Remembered so a folder full of XMP
         # sidecars or unreadable RAW isn't re-examined every five seconds forever.
         self._unusable: Set[str] = set()
+        self._observed: Dict[str, tuple] = {}
 
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -118,6 +119,7 @@ class HotFolderWatcher:
         self._status = HotFolderStatus(watching=False, folder=str(folder), run_id=run_id)
         self._last_new = time.time()
         self._last_ingest = 0.0
+        self._last_attempt = 0.0
         self._n_ingested = 0
 
     # ----------------------------------------------------------------- control
@@ -181,7 +183,7 @@ class HotFolderWatcher:
     def _scan(self) -> None:
         """Cheap pass: find new names, and decide which have finished copying."""
         try:
-            entries = list(self.folder.iterdir())
+            entries = [p for p in self.folder.rglob("*") if p.is_file()]
         except OSError as exc:
             with self._lock:
                 self._status.last_error = f"cannot read folder: {exc}"
@@ -192,13 +194,20 @@ class HotFolderWatcher:
             key = str(e)
             if e.suffix.lower() not in self._exts:
                 continue                      # not an image type we handle
-            if key in self._known or key in self._ready or key in self._unusable:
-                continue                      # already accounted for
             seen_now.add(key)
             try:
                 st = e.stat()
             except OSError:
                 continue                      # vanished mid-scan
+            signature = (st.st_size, st.st_mtime_ns)
+            prior_signature = self._observed.get(key)
+            self._observed[key] = signature
+            if prior_signature is not None and prior_signature != signature:
+                self._known.discard(key)
+                self._ready.discard(key)
+                self._unusable.discard(key)
+            if key in self._known or key in self._ready or key in self._unusable:
+                continue
             prev = self._pending.get(key)
             if prev is None:
                 self._pending[key] = _Pending(st.st_size, st.st_mtime_ns)
@@ -225,18 +234,30 @@ class HotFolderWatcher:
         # Forget pending entries whose file disappeared.
         for gone in [k for k in self._pending if k not in seen_now]:
             self._pending.pop(gone, None)
+        for gone in set(self._observed) - seen_now:
+            self._observed.pop(gone, None)
+            self._known.discard(gone)
+            self._ready.discard(gone)
+            self._unusable.discard(gone)
         with self._lock:
             self._status.last_scan = time.time()
+
+    def ingest_paths(self) -> List[Path]:
+        """Previously accepted files plus the stable arrivals in this batch."""
+        return [Path(p) for p in sorted(self._known | self._ready)]
 
     def _maybe_ingest(self) -> None:
         if not self._ready:
             return
-        if time.time() - self._last_ingest < self.batch_cooldown:
+        if time.time() - self._last_attempt < self.batch_cooldown:
             return
         batch = sorted(self._ready)
+        self._last_attempt = time.time()
         accepted = self._ingest([Path(p) for p in batch])
         if not accepted:
             return          # GPU busy (a manual upload won); try again next tick
+        with self._lock:
+            self._status.last_error = ""
         self._last_ingest = time.time()
         self._n_ingested += len(batch)
         self._known.update(batch)

@@ -1,0 +1,43 @@
+services:
+  image-filterer:
+    image: image-filterer:spark
+    platform: linux/arm64
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
+      args:
+        SPARK_BASE_IMAGE: ${SPARK_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.11-py3}
+    user: "${SPARK_UID:-1000}:${SPARK_GID:-1000}"
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${SPARK_BIND_IP:-0.0.0.0}:${SPARK_PORT:-8600}:8600"
+    environment:
+      IMAGE_FILTERER_PASSWORD: ${IMAGE_FILTERER_PASSWORD:?Set IMAGE_FILTERER_PASSWORD in .env.spark}
+    volumes:
+      - type: bind
+        source: ${SPARK_DATA_DIR:?Set SPARK_DATA_DIR in .env.spark}
+        target: /data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${LUCIDLINK_PATH:?Set LUCIDLINK_PATH in .env.spark}
+        target: /photos
+        read_only: true
+        bind:
+          create_host_path: false
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: 1gb
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import ssl, urllib.request; urllib.request.urlopen('https://127.0.0.1:8600/login', context=ssl._create_unverified_context(), timeout=5).close()"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3

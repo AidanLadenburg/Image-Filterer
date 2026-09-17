@@ -19,8 +19,6 @@
     padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border);
     position: sticky; top: 0; z-index: 20; }
   .stats { color: var(--text-dim); font-size: 12px;
-    /* No wrapping: the text changes as filters change, and a header that reflows
-       mid-drag is unusable. The slider sits to its LEFT so growth can't push it. */
     white-space: nowrap; }
   select, input, button { font: inherit; color: var(--text); }
   select, #search-input, #run-name-input {
@@ -31,6 +29,7 @@
   .btn { cursor: pointer; background: #1d212a; border: 1px solid var(--border);
     border-radius: 7px; padding: 6px 12px; }
   .btn:hover { border-color: #3a4152; }
+  .btn:disabled { opacity: .5; cursor: default; }
   .btn.primary { background: var(--accent); color: #0e0f12; border-color: var(--accent); font-weight: 600; }
   .btn.primary:disabled { opacity: .5; cursor: default; }
   .pills { display: flex; gap: 6px; align-items: center; }
@@ -40,7 +39,12 @@
   .pill.shot.active { background: var(--accent2); border-color: var(--accent2); color: #0e0f12; font-weight: 600; }
   .pill.subj.active { background: #57b6a6; border-color: #57b6a6; color: #0e0f12; font-weight: 600; }
   .pill.hero-pill.active { background: #e0a53a; border-color: #e0a53a; color: #0e0f12; font-weight: 700; }
+  .pill.ungroup-pill.active { background: var(--accent2); border-color: var(--accent2); color: #0e0f12; font-weight: 700; }
   .pill.star-pill.active { background: var(--star); border-color: var(--star); color: #0e0f12; font-weight: 700; }
+  #hf-chip { display: none; align-items: center; gap: 6px; border: 1px solid var(--border);
+    border-radius: 999px; padding: 4px 11px; font-size: 12px; color: var(--text-dim); background: #14161c; }
+  #hf-chip.on { display: inline-flex; }
+  .hf-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good); flex: none; }
   .badge.hero { background: #4a3a12; color: #f0c96b; border: 1px solid #7a5f20; }
   .badge.starred { background: #4a3a12; color: var(--star); border: 1px solid #7a5f20; }
   .badge.starred-other { background: #16283a; color: var(--star-other); border: 1px solid #2c4a68; }
@@ -67,6 +71,30 @@
   #search-clear { cursor: pointer; border: 1px solid var(--border); background: #14161c;
     color: var(--text-dim); border-radius: 6px; padding: 5px 8px; }
   .spacer { margin-left: auto; }
+
+  /* Fixed rows; only the filter strip scrolls on narrow screens. */
+  .app-toolbar { display: block; padding: 10px 16px 6px; }
+  .toolbar-main { display: grid; grid-template-columns: minmax(140px, 240px) minmax(140px, 1fr) auto auto;
+    align-items: center; gap: 12px; }
+  .run-controls { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  #run-select { min-width: 0; width: 100%; text-overflow: ellipsis; }
+  .toolbar-main .search-box { min-width: 0; }
+  .toolbar-main #search-input { width: 100%; min-width: 0; max-width: none; }
+  .toolbar-main > .btn { white-space: nowrap; }
+  .toolbar-filters { display: flex; align-items: center; gap: 16px; overflow-x: auto;
+    flex-wrap: nowrap; padding: 10px 0 8px; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+  .toolbar-filters > * { flex: 0 0 auto; white-space: nowrap; }
+  .toolbar-filters:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .toolbar-status { display: flex; align-items: center; gap: 12px; height: 28px; min-width: 0; }
+  .toolbar-status .stats { overflow: hidden; text-overflow: ellipsis; }
+  .toolbar-status #hf-chip { flex: 0 0 auto; margin-left: auto; max-width: 45%; }
+  #hf-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  @media (max-width: 760px) {
+    .app-toolbar { padding-left: 10px; padding-right: 10px; }
+    .toolbar-main { grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px; }
+    .toolbar-main .search-box { grid-column: 1 / -1; grid-row: 2; }
+    .toolbar-main > .btn { padding: 6px 8px; }
+  }
 
   /* upload panel */
   #upload-panel { display: none; padding: 14px 16px; background: #12141a;
@@ -121,6 +149,12 @@
   .star-btn.on { opacity: 1; color: var(--star); border-color: #7a5f20; background: rgba(74,58,18,.8); }
   .star-btn.other { opacity: 1; color: var(--star-other); border-color: #2c4a68; background: rgba(20,38,58,.8); }
   .star-btn.busy { opacity: .5; pointer-events: none; }
+  /* Star count — a notification-style badge on the star button's corner, so
+     the number reads as "count for that icon" rather than a separate stat. */
+  .star-count-badge { position: absolute; top: 2px; right: 2px; z-index: 2;
+    min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px;
+    background: var(--star); color: #2a2210; font-size: 10px; font-weight: 700;
+    line-height: 16px; text-align: center; pointer-events: none; display: none; }
   .meta { padding: 8px 10px; }
   .row1 { display: flex; gap: 6px; align-items: center; margin-bottom: 5px; }
   .rank-chip { background: #23252d; color: var(--text-dim); border-radius: 6px; padding: 1px 7px;
@@ -205,55 +239,90 @@
   .hard { color: #ff9090; font-size: 10px; }
   .close { cursor: pointer; }
   .footer-hint { color: var(--text-dim); font-size: 12px; text-align: center; margin-top: 18px; }
+  #settings-panel { margin: 16px; padding: 18px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
+  #settings-panel h2 { margin: 0; font-size: 18px; }
+  #settings-panel h3 { margin-bottom: 8px; font-size: 14px; }
+  #settings-panel p { color: var(--text-dim); overflow-wrap: anywhere; }
+  .settings-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+  #settings-close { margin-left: auto; }
+  #export-toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 200; padding: 12px 18px; background: var(--panel); border: 1px solid var(--accent); border-radius: 8px; max-width: 90vw; }
 </style>
 </head>
 <body>
 
-<header>
+<header class="app-toolbar">
+  <div class="toolbar-main">
+    <div class="run-controls">
   <select id="run-select" title="Select an ingested run"></select>
   <button class="btn" id="delete-run" title="Delete this shoot" style="padding:5px 9px">🗑</button>
+    </div>
+  <span class="search-box">
+    <input id="search-input" type="search" placeholder="Search…  e.g. “person on stage”" autocomplete="off" spellcheck="false" />
+    <button id="search-clear" title="Clear (Esc)" style="display:none">✕</button>
+  </span>
+  <button class="btn primary" id="btn-upload">＋ Upload folder</button>
+  <button class="btn" id="settings-btn" aria-expanded="false" aria-controls="settings-panel">⚙ Settings</button>
+  </div>
+  <div class="toolbar-filters" role="group" aria-label="Photo filters and sorting" tabindex="0">
   <span class="ctl" id="quality-ctl" title="Hide everything below this quality band">
     <span class="shot-label">Quality</span>
     <input type="range" id="quality-slider" min="5" max="100" step="5" value="100" />
     <span id="quality-label">all</span>
   </span>
-  <span class="stats" id="stats"></span>
-  <span class="search-box">
-    <input id="search-input" type="search" placeholder="Search…  e.g. “person on stage”" autocomplete="off" spellcheck="false" />
-    <button id="search-clear" title="Clear (Esc)" style="display:none">✕</button>
-  </span>
   <div class="pills" id="shot-pills" title="Filter by shot scale">
     <span class="shot-label">Shot</span>
-    <span class="pill shot" data-shot="wide">Wide</span>
-    <span class="pill shot" data-shot="medium">Medium</span>
-    <span class="pill shot" data-shot="close">Close</span>
+    <button type="button" class="pill shot" data-shot="wide">Wide</button>
+    <button type="button" class="pill shot" data-shot="medium">Medium</button>
+    <button type="button" class="pill shot" data-shot="close">Close</button>
   </div>
   <div class="pills" id="subject-pills" title="Subject (click to cycle: All → Stage → People)">
     <span class="shot-label">Subject</span>
-    <span class="pill subj" id="subj-pill">All</span>
+    <button type="button" class="pill subj" id="subj-pill">All</button>
   </div>
-  <span class="pill hero-pill" id="hero-pill" title="Only clean solo hero shots">Hero</span>
-  <span class="pill star-pill" id="star-pill" title="Only frames you've starred (S in the viewer)">★ Starred</span>
-  <span class="pill select-pill" id="select-pill" title="Select multiple frames to download together">☑ Select</span>
+  <button type="button" class="pill hero-pill" id="hero-pill" title="Only clean solo hero shots">Hero</button>
+
+  <button type="button" class="pill star-pill" id="star-pill" title="Only frames you've starred (S in the viewer)">★ Starred</button>
+  <button type="button" class="pill select-pill" id="select-pill" title="Select multiple frames to download together">☑ Select</button>
   <span class="ctl" title="Ordering">
     <span class="shot-label">Sort</span>
     <select id="sort-select">
       <option value="rank">Best first</option>
       <option value="time">Chronological</option>
+      <option value="stars">Most starred</option>
     </select>
   </span>
-  <div class="ctl spacer" title="Thumbnail size — + / − to step, 0 to reset">
+  </div>
+  <div class="toolbar-status">
+    <span class="stats" id="stats" aria-live="polite"></span>
+  <span id="hf-chip" title="A folder is being watched — new photos are ingested automatically">
+    <span class="hf-dot"></span><span id="hf-text">watching</span>
+  </span>
+  </div>
+</header>
+
+<section id="settings-panel" aria-label="Settings" hidden>
+  <div class="settings-row"><h2>Settings</h2><button class="btn" id="settings-close">Close</button></div>
+  <h3>Export location</h3>
+  <p id="export-location" aria-live="polite">Browser downloads</p>
+  <div class="settings-row">
+    <button class="btn" id="export-local">Choose local folder</button>
+    <button class="btn" id="export-browser">Use browser downloads</button>
+  </div>
+  <p id="local-export-help"></p>
+  <p id="export-status" role="status"></p>
+  <h3>Browsing</h3>
+  <div class="settings-row">
+  <div class="ctl" title="Thumbnail size — + / − to step, 0 to reset">
     <span class="shot-label">Size</span>
     <button class="zbtn" id="zoom-out" aria-label="Smaller thumbnails">−</button>
     <select id="zoom-select" aria-label="Thumbnail size"></select>
     <button class="zbtn" id="zoom-in" aria-label="Bigger thumbnails">+</button>
   </div>
-  <span id="hf-chip" title="A folder is being watched — new photos are ingested automatically">
-    <span class="hf-dot"></span><span id="hf-text">watching</span>
-  </span>
-  <button class="btn primary" id="btn-upload">＋ Upload folder</button>
+  <button type="button" class="pill ungroup-pill" id="ungroup-pill" title="Show every photo as its own tile, instead of one tile per burst">Ungroup</button>
+  </div>
+  <h3>Your display name</h3>
   <button class="btn" id="name-pill" title="Set the name attached to stars you make">Set your name</button>
-</header>
+</section>
 
 <!-- One bar for the whole lifecycle: appears the moment work starts, tracks it,
      then turns into the reload prompt once the new photos are live. -->
@@ -294,6 +363,7 @@
   </div>
 </div>
 
+<div id="export-toast" role="status" hidden></div>
 <main>
   <div class="empty" id="empty">
     <div class="big">No run selected</div>
@@ -310,6 +380,7 @@
     </span>
     <button class="btn" id="clear-starred" style="display:none">☆ Clear starred</button>
     <span class="ab-note" id="ab-note"></span>
+    <button class="btn" id="export-change-btn" title="Export settings" style="display:none">Export settings</button>
   </div>
   <div class="grid" id="grid"></div>
   <div class="load-more-bar" id="load-more-bar">
@@ -351,6 +422,7 @@ const state = {
   bursts: [], shots: new Set(), subject: "", hero: false, query: "", offset: 0, total: 0,
   loading: false, openBurst: null, openIndex: -1, searchError: null, hasRun: false,
   starredOnly: false,      // the "★ Starred" view toggle
+  unfurl: false,           // "Ungroup": one tile per photo instead of per burst
   // No accounts here, so "you" is a random id kept in this browser. It is only
   // ever used to tell your stars apart from everyone else's.
   viewer: null,
@@ -372,8 +444,8 @@ const state = {
   pending: null,           // {version, n_frames} seen by the poller but not loaded
   lastFrames: null,        // frame count this view was built from
 };
-const imgUrl = p => "/img?path=" + encodeURIComponent(p);
-const thumbUrl = (p, w) => "/thumb?path=" + encodeURIComponent(p) + "&w=" + (w || 320);
+const imgUrl = p => "/img?path=" + encodeURIComponent(p) + "&run_id=" + state.runId + "&version=" + (state.version || 0);
+const thumbUrl = (p, w) => "/thumb?path=" + encodeURIComponent(p) + "&w=" + (w || 320) + "&run_id=" + state.runId + "&version=" + (state.version || 0);
 
 // ---- grid zoom ----
 // Tile width is a CSS variable, so zooming is a repaint rather than a refetch.
@@ -444,6 +516,9 @@ function buildQuery(offset, limit) {
   if (state.subject) p.set("subject", state.subject);
   if (state.hero) p.set("hero", "1");
   if (state.sort !== "rank") p.set("sort", state.sort);
+  // /api/starred is already one-row-per-frame, so this only matters for
+  // /api/bursts and /api/search.
+  if (state.unfurl && !state.starredOnly) p.set("unfurl", "1");
   // Starred frames are explicit human picks — the quality cutoff has no business
   // hiding them. Every other filter still applies there.
   if (state.topPct < 100 && !state.starredOnly) p.set("top_pct", state.topPct);
@@ -458,12 +533,13 @@ function buildQuery(offset, limit) {
 
 // ---- downloads ----
 // Everything here hands back originals, never the preview renditions.
-const dlUrl = p => "/download?path=" + encodeURIComponent(p);
+const dlUrl = (p, runId = state.runId) => "/download?path=" + encodeURIComponent(p) + "&run_id=" + runId;
 const fmtBytes = n =>
   n >= 1e9 ? (n / 1e9).toFixed(1) + " GB" : n >= 1e6 ? Math.round(n / 1e6) + " MB"
            : Math.max(1, Math.round(n / 1e3)) + " KB";
 
 function downloadOne(path, btn) {
+  if (exportTarget !== "browser") return exportMany([path], btn, btn?.textContent, null);
   if (btn) { btn.classList.add("busy"); setTimeout(() => btn.classList.remove("busy"), 800); }
   // A plain anchor click keeps this a native browser download — no JS buffering.
   const a = document.createElement("a");
@@ -471,7 +547,8 @@ function downloadOne(path, btn) {
   document.body.appendChild(a); a.click(); a.remove();
 }
 
-/** Zip a selection. `body` is {scope:"starred"} or {paths:[…]}. */
+/** Zip a selection. `body` is {scope:"starred"} or {paths:[…]}. Fallback for
+ *  browsers without the File System Access API (Firefox, Safari). */
 async function downloadMany(body, btn) {
   const label = btn ? btn.textContent : null;
   if (btn) { btn.disabled = true; btn.textContent = "Preparing…"; }
@@ -491,6 +568,217 @@ async function downloadMany(body, btn) {
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = label; }
   }
+}
+
+// Local directory handles are remembered per browser; unavailable destinations
+// require an explicit change in Settings rather than silently downloading ZIPs.
+const canExport = window.isSecureContext && typeof window.showDirectoryPicker === "function";
+
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open("image-filterer", 1);
+    req.onupgradeneeded = () => req.result.createObjectStore("kv");
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbGet(key) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const req = db.transaction("kv", "readonly").objectStore("kv").get(key);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbSet(key, val) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("kv", "readwrite");
+    tx.objectStore("kv").put(val, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+let exportDirHandle = null;   // cached in memory once picked/loaded this session
+
+/** The remembered export folder, prompting for one if there isn't a usable
+ *  one yet. Must be called from inside a user-gesture handler (a click) —
+ *  both the permission prompt and the picker itself require that. */
+async function getExportDir(forcePicker) {
+  if (!canExport) return null;
+  if (!exportDirHandle && !forcePicker) {
+    try { exportDirHandle = (await idbGet("exportDir")) || null; } catch (e) {}
+  }
+  if (exportDirHandle && !forcePicker) {
+    try {
+      let perm = await exportDirHandle.queryPermission({ mode: "readwrite" });
+      if (perm !== "granted") perm = await exportDirHandle.requestPermission({ mode: "readwrite" });
+      if (perm === "granted") return exportDirHandle;
+    } catch (e) { exportDirHandle = null; }
+  }
+  try {
+    exportDirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
+    try { await idbSet("exportDir", exportDirHandle); } catch (e) { /* usable for this visit */ }
+    return exportDirHandle;
+  } catch (e) {
+    if (e.name !== "AbortError") reportExport(`Could not open the export folder: ${e.message}`);
+    return null;
+  }
+}
+
+/** Writes one blob into dirHandle as `filename`, avoiding two different
+ *  source photos clobbering each other under the same name (frames from
+ *  different cameras/folders sometimes share a filename). Returns
+ *  "written", "skipped" (an identical-content file is already there — a
+ *  re-export doesn't recopy it), or throws on a real failure. */
+async function sameContents(a, b) {
+  if (a.size !== b.size) return false;
+  const chunk = 1024 * 1024;
+  for (let offset = 0; offset < a.size; offset += chunk) {
+    const [ab, bb] = await Promise.all([
+      a.slice(offset, offset + chunk).arrayBuffer(),
+      b.slice(offset, offset + chunk).arrayBuffer(),
+    ]);
+    const av = new Uint8Array(ab), bv = new Uint8Array(bb);
+    if (av.some((value, i) => value !== bv[i])) return false;
+  }
+  return true;
+}
+
+async function writeFileToDir(dirHandle, filename, blob) {
+  let name = filename, n = 1;
+  for (;;) {
+    let existing = null;
+    try { existing = await (await dirHandle.getFileHandle(name)).getFile(); }
+    catch (e) { if (e.name !== "NotFoundError") throw e; }
+    if (!existing) break;
+    if (await sameContents(existing, blob)) return "skipped";
+    n += 1;
+    const dot = filename.lastIndexOf(".");
+    name = dot > 0 ? `${filename.slice(0, dot)}-${n}${filename.slice(dot)}` : `${filename}-${n}`;
+  }
+  const fh = await dirHandle.getFileHandle(name, { create: true });
+  const writable = await fh.createWritable();
+  try {
+    await writable.write(blob);
+    await writable.close();
+  } catch (e) {
+    try { await writable.abort(); } catch (_) {}
+    throw e;
+  }
+  return "written";
+}
+
+/** Export a list of paths into the remembered folder, updating `btn`/`note`
+ *  with live progress. `label` is restored on the button when done. */
+let exportBusy = false;
+async function exportMany(paths, btn, label, note) {
+  if (exportBusy) return;
+  exportBusy = true;
+  const runId = state.runId;
+  if (btn) btn.disabled = true;
+  refreshExportSettings();
+  let written = 0, skipped = 0, failed = 0, lastError = "";
+  try {
+    if (!canExport) throw new Error("This browser cannot write to your local folder. Choose another export location in Settings.");
+    const dir = await getExportDir(false);
+    if (!dir) return;
+    saveExportTarget("local");
+    const total = paths.length;
+    for (const path of paths) {
+      const progress = `Exporting ${written + skipped + failed + 1}/${total} to “${dir.name}”…`;
+      if (btn) btn.textContent = progress;
+      if (note) note.textContent = progress;
+      reportExport(progress);
+      try {
+        const res = await fetch(dlUrl(path, runId));
+        if (!res.ok) throw new Error(`Could not read original (${res.status}).`);
+        const blob = await res.blob();
+        const filename = path.split(/[\\/]/).pop() || "photo.jpg";
+        const outcome = await writeFileToDir(dir, filename, blob);
+        if (outcome === "skipped") skipped++; else written++;
+      } catch (e) {
+        failed++; lastError = e.message;
+      }
+    }
+    const remaining = total - written - skipped - failed;
+    const message = `Exported ${written} to “${dir.name}”` +
+      (skipped ? `, ${skipped} already there` : "") +
+      (failed ? `, ${failed} failed: ${lastError}` : "") +
+      (remaining ? `; ${remaining} not attempted` : "");
+    if (note) note.textContent = message;
+    reportExport(message);
+  } catch (e) {
+    if (note) note.textContent = e.message;
+    reportExport(e.message);
+  } finally {
+    exportBusy = false;
+    if (btn) { btn.disabled = false; btn.textContent = label; }
+    refreshExportSettings();
+  }
+}
+
+// Export preferences are per browser.
+let exportTarget = "browser";
+try {
+  const saved = localStorage.getItem("exportTarget");
+  if (["browser", "local"].includes(saved)) exportTarget = saved;
+} catch (_) {}
+function exportLocationLabel() {
+  if (exportTarget === "local") return exportDirHandle ? `Local folder / ${exportDirHandle.name}` : "Local folder — choose or authorize a folder";
+  return "Browser downloads (uses your browser’s download settings)";
+}
+function saveExportTarget(target) {
+  exportTarget = target;
+  try { localStorage.setItem("exportTarget", target); } catch (_) {}
+  refreshExportSettings();
+  updateActionBar();
+}
+function refreshExportSettings() {
+  $("#export-location").textContent = exportLocationLabel();
+  $("#export-local").disabled = !canExport || exportBusy;
+  $("#export-browser").disabled = exportBusy;
+}
+function openSettings() {
+  $("#settings-panel").hidden = false;
+  $("#settings-btn").setAttribute("aria-expanded", "true");
+  refreshExportSettings();
+  $("#settings-close").focus();
+}
+function closeSettings() {
+  $("#settings-panel").hidden = true;
+  $("#settings-btn").setAttribute("aria-expanded", "false");
+  $("#settings-btn").focus();
+}
+let toastTimer;
+function reportExport(message) {
+  $("#export-status").textContent = message;
+  const toast = $("#export-toast");
+  toast.textContent = message; toast.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.hidden = true; }, 12000);
+}
+function initSettings() {
+  $("#settings-btn").addEventListener("click", () => $("#settings-panel").hidden ? openSettings() : closeSettings());
+  $("#settings-close").addEventListener("click", closeSettings);
+  $("#local-export-help").textContent = canExport ? "All download and export buttons use this location. Local folders are remembered on this browser." : "Local folder selection requires Chrome or Edge on HTTPS or localhost. Use browser downloads instead.";
+  $("#export-local").addEventListener("click", async () => {
+    const dir = await getExportDir(true);
+    if (dir) saveExportTarget("local");
+  });
+  $("#export-browser").addEventListener("click", () => saveExportTarget("browser"));
+  refreshExportSettings();
+  idbGet("exportDir").then(dir => {
+    if (dir && !exportDirHandle) {
+      exportDirHandle = dir;
+      // Preserve the existing remembered local destination when upgrading.
+      let saved = null;
+      try { saved = localStorage.getItem("exportTarget"); } catch (_) {}
+      if (!saved) saveExportTarget("local");
+      else refreshExportSettings();
+    }
+  }).catch(() => {});
 }
 
 // ---- selection mode ----
@@ -519,20 +807,25 @@ function updateActionBar() {
   cs.style.display = (!selecting && starred) ? "" : "none";
   cs.disabled = !nMine;
   cs.textContent = nMine ? `☆ Clear my ${nMine}` : "☆ Clear my stars";
+  const verb = exportTarget !== "browser" ? "Export" : "⬇ Download";
+  const hint = exportTarget !== "browser" ? "Full-resolution originals, copied to your export folder"
+                         : "Full-resolution originals, as a .zip";
+  btn.title = exportLocationLabel();
+  $("#export-change-btn").style.display = "";
   if (selecting) {
     const n = state.selected.size;
-    btn.textContent = n ? `⬇ Download ${n} selected` : "⬇ Download selected";
+    btn.textContent = n ? `${verb} ${n} selected` : `${verb} selected`;
     btn.disabled = !n;
-    note.textContent = n ? "Full-resolution originals, as a .zip" : "Click tiles to select them.";
+    note.textContent = n ? hint : "Click tiles to select them.";
     bar.classList.add("show");
   } else if (starred) {
     const n = state.starOwner === "mine" ? state.starsMine.size
             : state.starOwner === "others" ? [...state.starsOthers].filter(p => !isMine(p)).length
             : nStarredTotal();
     const label = state.starOwner === "mine" ? "your" : state.starOwner === "others" ? "their" : "all";
-    btn.textContent = `⬇ Download ${label} ${n} starred`;
+    btn.textContent = `${verb} ${label} ${n} starred`;
     btn.disabled = !n;
-    note.textContent = n ? "Full-resolution originals, as a .zip" : "";
+    note.textContent = n ? hint : "";
     bar.classList.toggle("show", state.hasRun);
   } else {
     bar.classList.remove("show");
@@ -540,21 +833,44 @@ function updateActionBar() {
 }
 
 // ---- stars ----
+let starsRequest = 0;
 async function refreshStars() {
+  const requestId = ++starsRequest, runId = state.runId;
   try {
     const d = await (await fetch(`/api/stars?run_id=${state.runId || ""}&viewer=${state.viewer}`)).json();
+    if (requestId !== starsRequest || runId !== state.runId) return;
     state.starsMine = new Set(d.mine || []);
     state.starsOthers = new Set(d.others || []);
-  } catch (e) { state.starsMine = new Set(); state.starsOthers = new Set(); }
+    state.starNames = d.names || {};
+  } catch (e) { /* Keep the last known picks during a temporary network failure. */ }
+}
+// Stars are shared, so someone else's click should show up without you
+// reloading — unlike new photos, which deliberately wait for you to hit
+// Reload. This just repaints existing tiles' star icons/badges/pill; it never
+// touches pagination, scroll position, or which photos are on screen.
+async function pollStars() {
+  if (!state.hasRun || !state.runId) return;
+  await refreshStars();
+  paintStars();
 }
 const nStarredTotal = () =>
   state.starsMine.size + [...state.starsOthers].filter(p => !state.starsMine.has(p)).length;
 const isMine   = p => state.starsMine.has(p);
 const isOthers = p => state.starsOthers.has(p);
 function isStarred(path) { return isMine(path) || isOthers(path); }
+/** Paths for the current owner filter (all/mine/others) in the starred view —
+ *  the client-side mirror of what /api/download/prepare {scope:"starred"}
+ *  would resolve server-side, needed here so Export has an actual file list. */
+function starredPathsForOwner() {
+  if (state.starOwner === "mine") return [...state.starsMine];
+  if (state.starOwner === "others") return [...state.starsOthers];
+  return [...new Set([...state.starsMine, ...state.starsOthers])];
+}
 
 /** Persist one frame's star state, then repaint every control bound to it. */
 async function toggleStar(path, btn) {
+  const runId = state.runId;
+  ++starsRequest;
   // Toggles YOUR star. A frame someone else starred is still un-starred for
   // them; your click adds yours alongside theirs.
   const want = !isMine(path);
@@ -564,8 +880,12 @@ async function toggleStar(path, btn) {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path, starred: want, run_id: state.runId, viewer: state.viewer }),
     });
-    if (!res.ok) return;
+    if (!res.ok) { alert("Could not save this star. Please try again."); return; }
+    const data = await res.json().catch(() => null);
+    if (runId !== state.runId) return;
+    ++starsRequest;
     if (want) state.starsMine.add(path); else state.starsMine.delete(path);
+    if (data && data.starred_by) state.starNames[path] = data.starred_by;
     paintStars();
     // Leaving the starred view is what the user means by un-starring there, so
     // drop the tile rather than leaving a hollow star behind.
@@ -590,6 +910,11 @@ function paintStars() {
       el.title = mine ? `Starred by you${who}` : other ? `Starred by someone else${who}` : "Star this frame";
     }
   });
+  $$("[data-star-count-for]").forEach(el => {
+    const n = (state.starNames[el.dataset.starCountFor] || []).length;
+    el.textContent = n > 1 ? n : "";
+    el.style.display = n > 1 ? "block" : "none";
+  });
   const n = state.starsMine.size + [...state.starsOthers].filter(p => !isMine(p)).length;
   const pill = $("#star-pill");
   if (pill) pill.textContent = n ? `★ Starred (${n})` : "★ Starred";
@@ -612,6 +937,7 @@ function renderTiles(bursts, append) {
         <span class="sel-box">✓</span>
         <button class="star-btn" data-star-path="${esc(b.rep_path)}"
                 title="Star this frame">☆</button>
+        <span class="star-count-badge" data-star-count-for="${esc(b.rep_path)}"></span>
       </div>
       <div class="meta">
         <div class="row1">
@@ -622,7 +948,7 @@ function renderTiles(bursts, append) {
         </div>
         <div class="filename" title="${esc(b.rep_filename)}">${esc(b.rep_filename)}</div>
         <div class="badges">
-          <span class="badge">${b.burst_size} frame${b.burst_size===1?"":"s"}</span>
+          ${state.unfurl ? "" : `<span class="badge">${b.burst_size} frame${b.burst_size===1?"":"s"}</span>`}
           ${otherStar ? '<span class="badge starred-other" title="starred by someone else">★ theirs</span>' : ""}
           ${others > 0 ? `<span class="badge starred" title="starred frames elsewhere in this burst">★ ${others} more</span>` : ""}
           ${b.is_hero ? '<span class="badge hero">hero</span>' : ""}
@@ -661,7 +987,7 @@ function updateBar() {
   }
   const emptyEl = $("#empty");
   if (!state.hasRun) {
-    emptyEl.querySelector(".big").textContent = "No run selected";
+    emptyEl.querySelector(".big").textContent = state.searchError || "No run selected";
     emptyEl.style.display = "block";
     $("#load-more-bar").style.display = "none";
     $("#footer-hint").style.display = "none";
@@ -690,13 +1016,19 @@ function updateBar() {
   updateActionBar();
 }
 
+let pageRequest = 0, pageController = null;
 async function loadPage(reset) {
-  if (state.loading || !state.hasRun) { updateBar(); return; }
+  if (!state.hasRun || (state.loading && !reset)) { updateBar(); return; }
+  if (pageController) pageController.abort();
+  const requestId = ++pageRequest, runId = state.runId;
+  pageController = new AbortController();
   state.loading = true; updateBar();
   try {
     const offset = reset ? 0 : state.offset;
-    const res = await fetch(buildQuery(offset, PAGE));
+    const res = await fetch(buildQuery(offset, PAGE), { signal: pageController.signal });
     const data = await res.json();
+    if (requestId !== pageRequest || runId !== state.runId) return;
+    if (!res.ok) throw new Error(data.error || "Could not load photos. Please try again.");
     if (data.stale) {
       // New photos landed mid-browse. Keep what's on screen and make the reload
       // explicit rather than silently serving a page from a different ordering.
@@ -716,6 +1048,7 @@ async function loadPage(reset) {
       // Stars are shared server state, so another viewer's change shows up here.
       if (typeof data.stats.n_starred === "number" && data.stats.n_starred !== nStarredTotal()) {
         await refreshStars();
+        if (requestId !== pageRequest || runId !== state.runId) return;
       }
       state.lastFrames = data.stats.n_frames;
       const st = data.stats;
@@ -735,24 +1068,51 @@ async function loadPage(reset) {
       }
       paintStars();
     }
-  } finally { state.loading = false; updateBar(); }
+  } catch (e) {
+    if (e.name !== "AbortError" && requestId === pageRequest) {
+      state.searchError = e.message;
+      $("#stats").textContent = e.message;
+    }
+  } finally {
+    if (requestId === pageRequest) { state.loading = false; updateBar(); }
+  }
 }
 
+let modalRequest = 0;
 async function openModal(burst) {
+  const requestId = ++modalRequest, runId = state.runId;
   state.openBurst = burst;
+  state.openFrame = null;
+  $("#frame-strip").innerHTML = "";
+  $("#modal-img").removeAttribute("src");
+  $("#modal-meta").textContent = "Loading…";
   state.openIndex = state.bursts.indexOf(burst);
   // Default to the ordering the grid is using: in chronological mode a burst
   // read best-first no longer matches the sequence it was shot in.
   state.burstOrder = state.sort;
   $("#modal-title").textContent = `burst #${burst.burst_rank} — ${burst.burst_size} frame${burst.burst_size===1?"":"s"}`;
   $("#modal-bg").classList.add("open");
-  const data = await (await fetch(
-    `/api/burst/${burst.burst_id}?run_id=${state.runId || ""}&sort=${state.sort}` +
-    `&viewer=${state.viewer}&top_pct=${state.starredOnly ? 100 : state.topPct}`)).json();
-  state.burstHidden = data.n_frames_hidden || 0;
-  state.burstFrames = data.frames || [];
-  renderStrip(burst);
-  updateNav();
+  try {
+    const response = await fetch(
+      `/api/burst/${burst.burst_id}?run_id=${runId || ""}&sort=${state.sort}` +
+      `&viewer=${state.viewer}&top_pct=${state.starredOnly ? 100 : state.topPct}` +
+      (state.version != null ? `&version=${state.version}` : ""));
+    const data = await response.json();
+    if (requestId !== modalRequest || runId !== state.runId || state.openBurst !== burst) return;
+    if (data.stale) {
+      state.pending = { version: data.version };
+      closeModal(); updateReloadBar();
+      return;
+    }
+    if (!response.ok) throw new Error(data.error || "Could not open this moment.");
+    state.burstHidden = data.n_frames_hidden || 0;
+    state.burstFrames = data.frames || [];
+    renderStrip(burst);
+    updateNav();
+  } catch (e) {
+    if (requestId === modalRequest && state.openBurst === burst)
+      $("#modal-meta").textContent = e.message;
+  }
 }
 
 /** (Re)build the frame strip in the current burst order. */
@@ -776,7 +1136,7 @@ function renderStrip(burst, keepPath) {
       <img src="${thumbUrl(f.path,160)}" loading="lazy" />
       <div class="info">
         <div class="fn">${esc(f.filename)}</div>
-        <div class="sc">${byTime && f.captured_at ? esc(f.captured_at.slice(11,19)) + " · " : ""}score ${f.score_s12_after_hard.toFixed(2)}${f.shot_type ? " · " + f.shot_type : ""}</div>
+        <div class="sc">${byTime && f.captured_at ? esc(f.captured_at.slice(11,19)) + " · " : ""}score ${f.score_s12_after_hard.toFixed(2)}${f.shot_type ? " · " + f.shot_type : ""}${f.star_count ? ` · ★ ${f.star_count}` : ""}</div>
         ${f.tech_hard_reject ? `<div class="hard">REJ: ${esc(f.tech_hard_reject_reason || "hard")}</div>` : ""}
       </div>
       <span class="acts">
@@ -884,14 +1244,25 @@ async function doReload() {
   state.pending = null;
   state.version = null;          // adopt whatever generation the server is on
   updateActivityBar();
-  const want = Math.max(PAGE, state.bursts.length);
+  const want = Math.max(PAGE, state.bursts.length), runId = state.runId;
   await loadPage(true);
-  while (state.bursts.length < want && state.bursts.length < state.total) await loadPage(false);
+  while (!state.loading && !state.pending && runId === state.runId &&
+         state.bursts.length < want && state.bursts.length < state.total) {
+    const before = state.offset;
+    await loadPage(false);
+    if (state.offset === before) break;
+  }
 }
 async function pollVersion() {
   if (!state.hasRun || !state.runId) return;
+  const runId = state.runId;
   try {
     const d = await (await fetch("/api/version?run_id=" + state.runId)).json();
+    if (runId !== state.runId || d.version % 2) return;
+    if (state.version == null && d.version > 0 && !state.loading) {
+      await loadPage(true);
+      return;
+    }
     if (state.version != null && d.version !== state.version) {
       state.pending = { version: d.version, n_frames: d.n_frames };
       updateActivityBar();
@@ -913,18 +1284,43 @@ async function refreshRuns(selectId) {
   }
   return { runs, curId };
 }
+let runRequest = 0;
 async function selectRun(id) {
+  const requestId = ++runRequest;
+  ++pageRequest; ++starsRequest;
+  if (pageController) pageController.abort();
+  state.loading = false;
+  state.hasRun = false;
+  closeModal();
+  state.runId = id || null;
+  state.searchError = null;
+  state.starsMine = new Set(); state.starsOthers = new Set(); state.starNames = {};
+  state.bursts = []; state.offset = 0; state.total = 0; $("#grid").innerHTML = "";
   if (!id) { state.hasRun = false; state.bursts = []; $("#grid").innerHTML = ""; state.total = 0; updateBar(); return; }
   // Selection is per-viewer now: this only warms the server cache. Nobody
   // else's browser changes shoots because of it.
-  await fetch("/api/select_run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ run_id: id }) });
+  let response;
+  try {
+    response = await fetch("/api/select_run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ run_id: id }) });
+  } catch (e) {
+    if (requestId === runRequest) { state.searchError = "Could not connect. Select the shoot to retry."; updateBar(); }
+    return;
+  }
+  if (requestId !== runRequest) return;
+  if (!response.ok) {
+    const data = await response.json();
+    if (requestId !== runRequest) return;
+    state.searchError = data.error || "Could not select this shoot.";
+    updateBar();
+    return;
+  }
   state.runId = id; state.version = null; state.pending = null;
   try { localStorage.setItem("runId", String(id)); } catch (e) {}
   state.pending = null; updateActivityBar();
   state.hasRun = true; state.query = ""; $("#search-input").value = ""; $("#search-clear").style.display = "none";
   clearSelection();       // a selection from the previous run means nothing here
-  await refreshStars();   // stars are per-run, so re-mirror them before painting
-  loadPage(true);
+  await refreshStars();
+  if (requestId === runRequest) await loadPage(true);
 }
 
 // ---- global ingest bar (every client polls; visible to all users) ----
@@ -946,6 +1342,25 @@ async function pollActive() {
     }
     if (!a && _wasActive) { _wasActive = false; refreshRuns(state.runId); }
     updateActivityBar();
+  } catch (e) {}
+}
+
+// ---- hot folder (watch-a-folder) status ----
+async function pollHotFolder() {
+  try {
+    const d = await (await fetch("/api/hotfolder")).json();
+    $("#hf-chip").classList.toggle("on", !!d.watching);
+    $("#hf-start-btn").style.display = d.watching ? "none" : "";
+    $("#hf-stop-btn").style.display = d.watching ? "" : "none";
+    if (!d.watching) { $("#hf-text").textContent = "watching"; $("#hf-status").textContent = ""; return; }
+    const name = (d.folder || "").split("/").pop() || d.folder || "folder";
+    $("#hf-chip").title = `Watching ${d.folder || name} — new photos are ingested automatically`;
+    $("#hf-text").textContent = `watching ${name}`;
+    const bits = [`${d.n_ingested || 0} ingested`];
+    if (d.n_pending) bits.push(`${d.n_pending} arriving`);
+    if (d.n_unusable) bits.push(`${d.n_unusable} unreadable`);
+    if (d.last_error) bits.push(`last error: ${d.last_error}`);
+    $("#hf-status").textContent = bits.join(" · ");
   } catch (e) {}
 }
 
@@ -980,6 +1395,7 @@ function pollIngest(runId) {
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
+  initSettings();
   $("#load-more").addEventListener("click", () => state.pending ? doReload() : loadPage(false));
 
   // zoom control — restore the viewer's last size before the first render
@@ -1076,6 +1492,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     loadPage(true);
   });
 
+  // Ungroup — one tile per photo, no burst grouping. Remembered across visits.
+  try { state.unfurl = localStorage.getItem("unfurl") === "1"; } catch (e) {}
+  $("#ungroup-pill").classList.toggle("active", state.unfurl);
+  $("#ungroup-pill").addEventListener("click", () => {
+    state.unfurl = !state.unfurl;
+    $("#ungroup-pill").classList.toggle("active", state.unfurl);
+    try { localStorage.setItem("unfurl", state.unfurl ? "1" : "0"); } catch (e) {}
+    loadPage(true);
+  });
+
   // Starred toggle
   $("#star-pill").addEventListener("click", () => {
     state.starredOnly = !state.starredOnly;
@@ -1105,9 +1531,18 @@ document.addEventListener("DOMContentLoaded", async () => {
     updateActionBar();
   });
   $("#dl-action").addEventListener("click", e => {
-    if (state.selectMode) downloadMany({ paths: [...state.selected] }, e.target);
-    else downloadMany({ scope: "starred" }, e.target);
+    const btn = e.target, label = btn.textContent;
+    if (state.selectMode) {
+      const paths = [...state.selected];
+      if (exportTarget !== "browser") exportMany(paths, btn, label, $("#ab-note"));
+      else downloadMany({ paths }, btn);
+    } else if (exportTarget !== "browser") {
+      exportMany(starredPathsForOwner(), btn, label, $("#ab-note"));
+    } else {
+      downloadMany({ scope: "starred" }, btn);
+    }
   });
+  $("#export-change-btn").addEventListener("click", openSettings);
   $("#clear-starred").addEventListener("click", async () => {
     const n = state.starsMine.size;
     if (!n) return;
@@ -1151,6 +1586,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#modal-prev").addEventListener("click", () => step(-1));
   $("#modal-next").addEventListener("click", () => step(1));
   document.addEventListener("keydown", e => {
+    if (!$("#settings-panel").hidden) {
+      if (e.key === "Escape") closeSettings();
+      return;
+    }
     if ($("#modal-bg").classList.contains("open")) {
       if (e.key === "Escape") closeModal();
       else if (e.key === "ArrowRight") step(1);
@@ -1316,6 +1755,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   setInterval(pollActive, 2000);
   // Same cadence: cheap (a stat + one DB row) and keeps the banner responsive.
   setInterval(pollVersion, 2000);
+  // Stars are cheap to poll (one JSON blob of paths) and change often enough
+  // during a live event that waiting for a manual reload felt broken.
+  setInterval(pollStars, 3000);
   pollHotFolder();
   setInterval(pollHotFolder, 5000);
 });

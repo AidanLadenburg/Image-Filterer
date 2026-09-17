@@ -163,16 +163,19 @@ def stratified_holdout(
 
 def stratified_kfold(y: np.ndarray, k: int, seed: int) -> List[Tuple[np.ndarray, np.ndarray]]:
     rng = np.random.default_rng(seed)
-    folds: List[Tuple[np.ndarray, np.ndarray]] = []
+    if k < 2 or k > min(np.count_nonzero(y == c) for c in (0, 1)):
+        raise ValueError("Each class needs at least one sample per validation fold.")
+    parts_by_class = []
+    for c in (0, 1):
+        idx = np.where(y == c)[0]
+        rng.shuffle(idx)
+        parts_by_class.append(np.array_split(idx, k))
+    folds = []
     for fi in range(k):
-        val, train = [], []
-        for c in (0, 1):
-            idx = np.where(y == c)[0]
-            rng.shuffle(idx)
-            parts = np.array_split(idx, k)
-            val.append(parts[fi])
-            train.append(np.concatenate([parts[j] for j in range(k) if j != fi]))
-        folds.append((np.concatenate(train), np.concatenate(val)))
+        val = np.concatenate([parts[fi] for parts in parts_by_class])
+        train = np.concatenate([part for parts in parts_by_class
+                                for j, part in enumerate(parts) if j != fi])
+        folds.append((train, val))
     return folds
 
 
@@ -186,7 +189,13 @@ def auc_mannwhitney(y: np.ndarray, s: np.ndarray) -> float:
     neg = s[y == 0]
     if len(pos) == 0 or len(neg) == 0:
         return float("nan")
-    ranks = np.argsort(np.argsort(np.concatenate([pos, neg])))
+    values = np.concatenate([pos, neg])
+    order = np.argsort(values, kind="stable")
+    sorted_values = values[order]
+    starts = np.r_[0, np.flatnonzero(np.diff(sorted_values)) + 1]
+    ends = np.r_[starts[1:], len(values)]
+    ranks = np.empty(len(values), dtype=np.float64)
+    ranks[order] = np.repeat((starts + ends - 1) / 2, ends - starts)
     r_pos = ranks[: len(pos)]
     n1, n2 = len(pos), len(neg)
     u = r_pos.sum() - n1 * (n1 - 1) / 2
@@ -227,6 +236,7 @@ def _train_one(
     top_mask: Optional[np.ndarray] = None,
 ) -> Tuple[RankNet, Dict[str, List[float]]]:
     """Train a single RankNet on (X, y). Optionally track val AUC each epoch."""
+    torch.manual_seed(cfg.seed)
     in_dim = X.shape[1]
     model = RankNet(in_dim, cfg.hidden, cfg.dropout).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
@@ -296,8 +306,8 @@ def cross_validate_and_fit(
     inner_aucs: List[float] = []
     if len(ho_idx) > 0 and cfg.cv_folds >= 2:
         min_class = int(min((y[tr_idx] == 0).sum(), (y[tr_idx] == 1).sum()))
-        k = min(cfg.cv_folds, max(2, min_class))
-        folds = stratified_kfold(y[tr_idx], k=k, seed=cfg.seed + 1)
+        k = min(cfg.cv_folds, min_class)
+        folds = stratified_kfold(y[tr_idx], k=k, seed=cfg.seed + 1) if k >= 2 else []
         for fi, (tr_l, va_l) in enumerate(folds):
             tr_g = tr_idx[tr_l]
             va_g = tr_idx[va_l]

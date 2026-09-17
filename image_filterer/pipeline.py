@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import tempfile
+import uuid
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence
 
@@ -27,7 +30,7 @@ def atomic_write(path: Path, write: "Callable[[Path], None]") -> Path:
     ``search_index.npy``; ``os.replace`` is atomic on POSIX, so a reader sees
     either the old file or the new one and never a partial one.
     """
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         write(tmp)
         os.replace(tmp, path)
@@ -40,56 +43,68 @@ def atomic_write(path: Path, write: "Callable[[Path], None]") -> Path:
     return path
 
 
-def _write_seq(run_dir: Path, seq: int, fields: dict) -> int:
-    payload = {"version": seq, **fields}
-    atomic_write(run_dir / "version.json",
-                 lambda t: t.write_text(json.dumps(payload, indent=1)))
-    return seq
-
-
-def begin_write(run_dir: Path, **fields) -> int:
-    """Mark the run's outputs as being rewritten (odd sequence number).
-
-    This is a seqlock. Writing several files can never be one atomic operation,
-    so instead of trying, we publish the fact that a write is in flight: readers
-    that see an odd sequence know the files on disk may disagree with each other
-    and wait rather than reading a mixture of two generations.
-    """
-    return _write_seq(run_dir, read_version(run_dir) | 1, fields)
-
-
-def commit_write(run_dir: Path, **fields) -> int:
-    """Publish the finished batch (even sequence number). THE COMMIT POINT.
-
-    Every output is already in place when this lands, so a reader that observes
-    this sequence — unchanged across its whole read — is guaranteed a complete,
-    self-consistent batch.
-    """
-    return _write_seq(run_dir, (read_version(run_dir) | 1) + 1, fields)
+def output_dir(run_dir: Path) -> Path:
+    """Resolve one immutable published snapshot; support pre-generation runs."""
+    current = Path(run_dir) / "current"
+    return current.resolve(strict=True) if current.is_symlink() else Path(run_dir)
 
 
 def read_version(run_dir: Path) -> int:
-    """Sequence number of a run's outputs. Odd = a write is in flight.
-
-    0 when the run predates versioning, which reads as "stable, generation zero".
-    """
-    path = Path(run_dir) / "version.json"
+    path = output_dir(run_dir) / "version.json"
     if not path.exists():
         return 0
+    return int(json.loads(path.read_text()).get("version", 0))
+
+
+def publish_outputs(run_dir: Path, write: Callable[[Path], None], **counts) -> int:
+    """Build an entire generation before atomically switching the current link.
+
+    A crash before the switch leaves the old generation available. A crash
+    after it leaves a complete new generation. Readers resolve the link once.
+    Top-level aliases preserve the familiar CSV paths for external tools.
+    """
+    run_dir = Path(run_dir).resolve()
+    generations = run_dir / ".generations"
+    generations.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix="generation-", dir=generations))
+    previous = output_dir(run_dir)
+    version = (read_version(run_dir) | 1) + 1
+    switched = False
+    link = run_dir / f".current-{uuid.uuid4().hex}"
     try:
-        return int(json.loads(path.read_text()).get("version", 0))
-    except Exception:  # noqa: BLE001
-        return 0
+        write(stage)
+        (stage / "version.json").write_text(json.dumps({"version": version, **counts}))
+        link.symlink_to(stage.relative_to(run_dir), target_is_directory=True)
+        os.replace(link, run_dir / "current")
+        switched = True
+        for name in ("ranked.csv", "bursts.csv", "search_index.npy", "search_index.json",
+                     "version.json", "config.json"):
+            alias = run_dir / f".{name}-{uuid.uuid4().hex}"
+            try:
+                alias.symlink_to(Path("current") / name)
+                os.replace(alias, run_dir / name)
+            finally:
+                alias.unlink(missing_ok=True)
+    finally:
+        link.unlink(missing_ok=True)
+        if not switched:
+            shutil.rmtree(stage)
+    # Keep the previous generation for readers that already resolved its path.
+    # Older readers can retry against current if they race cleanup.
+    for old in generations.iterdir():
+        if old.is_dir() and old not in (stage, previous):
+            shutil.rmtree(old, ignore_errors=True)
+    return version
 
 
 def list_images(root: Path) -> List[Path]:
     """Images directly inside ``root`` (non-recursive). Empty list if absent."""
     if not root.is_dir():
         return []
-    return sorted(p for p in root.iterdir() if p.suffix in IMAGE_EXTS and p.is_file())
+    return sorted(p for p in root.iterdir() if p.suffix.lower() in IMAGE_EXTS and p.is_file())
 
 
-def scan_images(root: Path) -> List[Path]:
+def scan_images(root: Path, *, candidates=None) -> List[Path]:
     """Images anywhere under ``root`` (recursive).
 
     When a shoot contains both ``X.CR3`` and ``X.JPG``, the JPEG wins and the RAW
@@ -100,7 +115,8 @@ def scan_images(root: Path) -> List[Path]:
     """
     from .imaging import is_raw
 
-    found = sorted(p for p in root.rglob("*") if p.suffix in IMAGE_EXTS and p.is_file())
+    entries = root.rglob("*") if candidates is None else candidates
+    found = sorted(p for p in entries if p.suffix.lower() in IMAGE_EXTS and p.is_file())
     non_raw_stems = {(p.parent, p.stem) for p in found if not is_raw(p)}
     return [p for p in found if not (is_raw(p) and (p.parent, p.stem) in non_raw_stems)]
 
@@ -199,11 +215,6 @@ def write_search_index(
 
 def write_bursts_csv(df: pd.DataFrame, run_dir: Path, cfg: Config) -> Path:
     """One row per burst (its representative + size), ranked."""
-    score_col = (
-        cfg.bursts.representative_score_col
-        if cfg.bursts.representative_score_col in df.columns
-        else "score_s1"
-    )
     reps = df[df["is_representative"]].copy()
     sizes = df.groupby("burst_id").size().rename("burst_size").reset_index()
     bursts = reps.merge(sizes, on="burst_id").sort_values("burst_rank").reset_index(drop=True)

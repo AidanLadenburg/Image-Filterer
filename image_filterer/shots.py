@@ -19,7 +19,11 @@ be backfilled for any run from its search index / feature cache.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import List, Optional, Sequence, Tuple
+
+from .cache_io import FeatureCache
 
 import numpy as np
 
@@ -79,6 +83,7 @@ def compute_shot_types(
     cfg: ShotConfig,
     *,
     text_encoder: Optional[TextEncoder] = None,
+    cache: Optional[FeatureCache] = None,
 ) -> Tuple[List[str], np.ndarray]:
     """Tag a matrix of full-frame embeddings with (labels, closeness).
 
@@ -87,8 +92,14 @@ def compute_shot_types(
     """
     if not context_encoder_has_text_tower(context_encoder_name):
         return [], np.zeros((0,), dtype=np.float32)
-    if text_encoder is None:
-        text_encoder = build_text_encoder(context_encoder_name)
-    axis = build_shot_axis(text_encoder)
+    key = hashlib.sha1(json.dumps([context_encoder_name, WIDE_PROMPTS, CLOSE_PROMPTS]).encode()).hexdigest()
+    if cache is not None and cache.has(key, "shot_axis", context_encoder_name):
+        axis = cache.load(key, "shot_axis", context_encoder_name)["z"]
+    else:
+        if text_encoder is None:
+            text_encoder = build_text_encoder(context_encoder_name)
+        axis = build_shot_axis(text_encoder)
+        if cache is not None:
+            cache.save(key, "shot_axis", {"z": axis}, context_encoder_name)
     closeness = closeness_scores(emb_full.astype(np.float32), axis)
     return classify_closeness(closeness, cfg), closeness

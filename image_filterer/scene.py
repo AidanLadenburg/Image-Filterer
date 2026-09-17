@@ -22,7 +22,7 @@ from typing import Optional, Tuple
 import numpy as np
 from PIL import Image
 
-from .cache_io import FeatureCache
+from .cache_io import FeatureCache, config_namespace
 
 SCENE_CACHE_ID = "yolov8s"  # cache namespace for the raw scene vector
 
@@ -59,6 +59,11 @@ class SceneAnalyzer:
         self.cache = cache
         self.device = device
         self._model = None
+        defaults = SceneConfig()
+        measured = ("yolo_model", "prominent_area", "bg_luma", "bg_small")
+        self.cache_id = config_namespace(SCENE_CACHE_ID,
+            {k: getattr(cfg, k) for k in measured},
+            {k: getattr(defaults, k) for k in measured})
 
     def _yolo(self):
         if self._model is None:
@@ -78,9 +83,14 @@ class SceneAnalyzer:
         file is only worth paying for on a miss, and for RAW a needless open
         means pulling a 30 MB container off disk (or off a network share).
         """
-        if self.cache.has(sha1, "scene", SCENE_CACHE_ID):
-            return self.cache.load(sha1, "scene", SCENE_CACHE_ID)["z"]
-        img = (pil() if callable(pil) else pil).convert("RGB")
+        if self.cache.has(sha1, "scene", self.cache_id):
+            return self.cache.load(sha1, "scene", self.cache_id)["z"]
+        source = pil() if callable(pil) else pil
+        try:
+            img = source.convert("RGB")
+        finally:
+            if callable(pil):
+                source.close()
         W, H = img.size
         res = self._yolo().predict(img, verbose=False, device=self.device)[0]
         box_norm = None
@@ -98,7 +108,7 @@ class SceneAnalyzer:
         gray = np.asarray(img.convert("L").resize((max(1, int(W * sc)), max(1, int(H * sc)))))
         bg = _bg_bright_frac(gray, box_norm, self.cfg)
         vec = np.array([area, nprom, second, bg], dtype=np.float32)
-        self.cache.save(sha1, "scene", {"z": vec}, SCENE_CACHE_ID)
+        self.cache.save(sha1, "scene", {"z": vec}, self.cache_id)
         return vec
 
     def close(self) -> None:

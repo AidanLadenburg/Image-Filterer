@@ -21,10 +21,10 @@ import numpy as np
 from PIL import Image
 from tqdm import tqdm
 
-from .cache_io import FeatureCache, Sha1Memo, file_sha1
+from .cache_io import FeatureCache, Sha1Memo, config_namespace
 from .config import FeatureConfig
 from .imaging import open_image
-from .encoders import FrozenEncoder, build_encoder, build_face_encoder_with_fallback
+from .encoders import FrozenEncoder, build_encoder, build_face_encoder
 from .face import FaceAnalyzer, FaceMetrics, maybe_get_va
 
 
@@ -124,7 +124,13 @@ class FeatureExtractor:
         # Non-default face detectors change the crops, so their emb_face + face
         # meta must not collide with the MediaPipe-cropped cache entries.
         det = getattr(fc, "face_detector", "mediapipe")
-        self._face_ns = "" if det == "mediapipe" else f"+det-{det}"
+        measured = ("face_expand", "yunet_score_threshold", "yunet_det_size",
+                    "skip_face_detect", "use_valence_arousal")
+        defaults = FeatureConfig()
+        self._face_ns = config_namespace(
+            "" if det == "mediapipe" else f"+det-{det}",
+            {k: getattr(fc, k) for k in measured},
+            {k: getattr(defaults, k) for k in measured})
         self._extract_body = getattr(fc, "extract_body", True)
 
     @property
@@ -143,7 +149,7 @@ class FeatureExtractor:
 
     def _face_encoder(self) -> FrozenEncoder:
         if self._face_enc is None:
-            self._face_enc = build_face_encoder_with_fallback(self.fc.face_encoder)
+            self._face_enc = build_face_encoder(self.fc.face_encoder)
         return self._face_enc
 
     def _face_analyzer(self):
@@ -213,7 +219,8 @@ class FeatureExtractor:
         if need_recrop:
             an = self._face_analyzer()
             for i in tqdm(need_recrop, desc=f"{desc}: face/quality"):
-                im = open_image(paths[i]).convert("RGB")
+                with open_image(paths[i]) as source:
+                    im = source.convert("RGB")
                 full, face, body, m = an.analyze(im)
                 full_imgs[i] = full
                 face_crops[i] = face
@@ -274,17 +281,17 @@ class FeatureExtractor:
     # ----- ids: avoid loading encoders just to compute strings -----
 
     def _ctx_id_lazy(self) -> str:
-        # Mirror the encoder_id() format so we can probe the cache without instantiating weights.
-        if self._ctx is not None:
-            return self._ctx.encoder_id()
-        # Best-effort string: the actual id includes embed_dim / nominal_input_size, which we don't
-        # know without instantiation. We *load* the encoder if we'd otherwise have a cache miss; if
-        # the cache is fully populated we still need a stable id, so we instantiate once. Cheaper
-        # alternative: store a sidecar mapping. For simplicity, instantiate.
-        return self._ctx_encoder().encoder_id()
+        # Production architecture IDs are fixed; cache hits need no model load.
+        known = {"siglip2_so400m_14": "siglip2_so400m_14@256d1152",
+                 "siglip2_so400m_16_384": "siglip2_so400m_16_384@384d1152"}
+        name = self.fc.context_encoder.strip().lower()
+        return known[name] if name in known else self._ctx_encoder().encoder_id()
 
     def _face_id_lazy(self) -> str:
-        base = self._face_enc.encoder_id() if self._face_enc is not None else self._face_encoder().encoder_id()
+        name = self.fc.face_encoder.strip().lower()
+        known = {"farl_base": "farl_base@224d512",
+                 "siglip2_so400m_14": "siglip2_so400m_14@256d1152"}
+        base = known[name] if name in known else self._face_encoder().encoder_id()
         return base + self._face_ns
 
     def close(self) -> None:

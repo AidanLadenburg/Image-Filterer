@@ -1,7 +1,6 @@
 """Stage-2 technical quality: soft penalty + minimal hard-reject set.
 
-The point of this stage is *not* to make subjective judgements — that's stages 1
-and 3. It only handles things that are unambiguously bad:
+The point of this stage is *not* to make subjective judgements — the learned ranker does that. It only handles things that are unambiguously bad:
   - Eyes definitely closed in a portrait (large face area, low EAR)
   - Severely blurry face (Laplacian variance under floor)
   - Face is mostly blown highlights or crushed shadows

@@ -42,6 +42,14 @@ def _atomic_write(path: Path, write) -> None:
                 pass
 
 
+def config_namespace(base: str, values: dict, defaults: dict) -> str:
+    """Keep the production namespace; distinguish changed measurement inputs."""
+    if values == defaults:
+        return base
+    digest = hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()[:16]
+    return f"{base}+cfg-{digest}"
+
+
 def file_sha1(path: Path, chunk: int = 1 << 20) -> str:
     h = hashlib.sha1()
     with open(path, "rb") as f:

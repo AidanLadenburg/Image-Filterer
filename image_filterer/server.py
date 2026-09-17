@@ -12,6 +12,8 @@ single-flight (guarded by a lock).
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import io
 import json
 import mimetypes
@@ -43,7 +45,8 @@ from PIL import Image
 from .config import Config, default_config
 from .db import RunDB
 from .ingest import ingest_folder
-from .pipeline import read_version
+from .pipeline import output_dir, read_version
+from .stars import StarStore
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 
@@ -99,13 +102,23 @@ class LoadedRun:
     # path -> set of viewer ids that starred it. A star belongs to whoever made
     # it: several people can star the same frame, and un-starring only ever
     # removes your own. (Before this, clicking a colleague's star deleted it.)
-    stars: Dict[str, Set[str]] = field(default_factory=dict)
+    star_store: StarStore
+    allowed_paths: Set[str] = field(default_factory=set)
     emb: Optional[np.ndarray] = None
     emb_context: Optional[str] = None
     shot_types: Optional[np.ndarray] = None
     captured: Optional[np.ndarray] = None
     scores_sorted: Optional[np.ndarray] = None   # for the quality percentile
-    stars_lock: threading.Lock = field(default_factory=threading.Lock)
+    # RLock, not Lock: writers (api_star) hold this while calling read helpers
+    # like _star_flags that also acquire it, to build a consistent response
+    # from the same critical section — a plain Lock would deadlock there.
+    @property
+    def stars(self):
+        return self.star_store.stars
+
+    @property
+    def stars_lock(self):
+        return self.star_store.lock
 
 
 def create_app(cfg: Optional[Config] = None) -> Flask:
@@ -118,6 +131,11 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
     # Long enough to cover a full event day without re-prompting; short enough
     # that a lost/shared laptop isn't logged in forever.
     app.permanent_session_lifetime = timedelta(hours=18)
+    app.config["SESSION_REFRESH_EACH_REQUEST"] = False
+
+    def _auth_version():
+        return hmac.new(app.secret_key, (cfg.password or "").encode("utf-8"),
+                        hashlib.sha256).hexdigest()
 
     # Display names are opt-in and keyed by the same per-browser viewer id
     # stars already use, so "attach a name" doesn't need real accounts. Global
@@ -164,7 +182,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
             return None
         if request.path == "/login" or request.method == "OPTIONS":
             return None
-        if session.get("authed"):
+        if secrets.compare_digest(str(session.get("auth_version", "")), _auth_version()):
             return None
         if request.path == "/":
             return send_file(LOGIN_TEMPLATE)
@@ -175,10 +193,11 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         if not cfg.password:
             return jsonify({"ok": True})
         data = request.get_json(silent=True) or {}
-        if not secrets.compare_digest(str(data.get("password", "")), cfg.password):
+        if not secrets.compare_digest(str(data.get("password", "")).encode("utf-8"),
+                                      cfg.password.encode("utf-8")):
             return jsonify({"ok": False, "error": "Wrong password."}), 401
         session.permanent = True
-        session["authed"] = True
+        session["auth_version"] = _auth_version()
         viewer = str(data.get("viewer") or "")
         name = str(data.get("name") or "")
         if viewer and name:
@@ -201,10 +220,11 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
     runs_cache: "OrderedDict[int, LoadedRun]" = OrderedDict()
     runs_lock = threading.Lock()
     RUN_CACHE_MAX = 3
+    star_stores: Dict[int, StarStore] = {}
+    load_locks: Dict[int, threading.RLock] = {}
 
     state: Dict[str, object] = {
         # Genuinely global: one GPU, one ingest at a time, one shared text tower.
-        "allowed_roots": set(),          # union over every run loaded this session
         "text_encoder": None,
         "search_lock": threading.Lock(),
         "ingest_lock": threading.Lock(),
@@ -225,31 +245,6 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
     # saving. They live in the run's own folder, next to ranked.csv, which makes
     # them shared by every viewer and portable with the run.
 
-    LEGACY_VIEWER = "legacy"   # stars made before ownership was tracked
-
-    def _load_stars(run_dir: Path) -> Dict[str, Set[str]]:
-        p = run_dir / "stars.json"
-        if not p.exists():
-            return {}
-        try:
-            blob = json.loads(p.read_text())
-        except Exception:  # noqa: BLE001 — a corrupt stars file must not block the run
-            return {}
-        if isinstance(blob.get("stars"), dict):          # current format
-            return {str(k): {str(v) for v in (vs or [])} for k, vs in blob["stars"].items()}
-        # v1: a flat list with no owner. Attribute to nobody in particular.
-        return {str(x): {LEGACY_VIEWER} for x in (blob.get("starred") or [])}
-
-    def _save_stars(rn: LoadedRun) -> None:
-        """Write via a temp file + rename so a crash mid-write can't truncate it."""
-        payload = json.dumps({
-            "version": 2,
-            "stars": {k: sorted(v) for k, v in sorted(rn.stars.items()) if v},
-        }, indent=1)
-        tmp = rn.run_dir / "stars.json.tmp"
-        tmp.write_text(payload)
-        tmp.replace(rn.run_dir / "stars.json")
-
     def _viewer() -> str:
         """Who is asking. Browser-generated id — there are no accounts here."""
         v = request.args.get("viewer")
@@ -257,29 +252,51 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
             v = (request.get_json(silent=True) or {}).get("viewer")
         return str(v or "anon")
 
+    def _stars_snapshot(rn: LoadedRun) -> Dict[str, Set[str]]:
+        """Point-in-time copy of ``rn.stars``, safe to iterate.
+
+        Every read below used to touch ``rn.stars`` (and its per-path owner
+        sets) directly. That races the writer in ``api_star``/
+        ``api_stars_clear``, which mutates those same dict/set objects under
+        ``rn.stars_lock`` — a concurrent read mid-mutation can raise
+        ``RuntimeError: dictionary/set changed size during iteration``, which
+        Flask turns into a 500 and the client into "stars just vanished".
+        Rare when stars were only fetched occasionally; routine once the
+        client started polling ``/api/stars`` every few seconds. Reads now
+        take one locked, deep-copied snapshot and work off that instead.
+        """
+        with rn.stars_lock:
+            return {p: set(o) for p, o in rn.stars.items()}
+
     def _star_owners(rn: LoadedRun, path: str) -> Set[str]:
-        return rn.stars.get(str(path), set())
+        with rn.stars_lock:
+            return set(rn.stars.get(str(path), ()))
 
     def _star_flags(rn: LoadedRun, path: str, me: str) -> Dict[str, object]:
         owners = _star_owners(rn, path)
         return {"starred": bool(owners),
                 "starred_mine": me in owners,
                 "starred_others": bool(owners - {me}),
-                "starred_by": sorted(_display_name(o) for o in owners)}
+                "starred_by": sorted(_display_name(o) for o in owners),
+                # Per-FRAME count, not per-burst — how many people starred
+                # *this specific image*, independent of its burst-mates.
+                "star_count": len(owners)}
 
     def _paths_for_owner(rn: LoadedRun, me: str, owner: str) -> Set[str]:
         """Starred paths filtered to all / just mine / just other people's."""
+        stars = _stars_snapshot(rn)
         if owner == "mine":
-            return {p for p, o in rn.stars.items() if me in o}
+            return {p for p, o in stars.items() if me in o}
         if owner == "others":
-            return {p for p, o in rn.stars.items() if o - {me}}
-        return {p for p, o in rn.stars.items() if o}
+            return {p for p, o in stars.items() if o - {me}}
+        return {p for p, o in stars.items() if o}
 
     def _starred_counts(rn: LoadedRun) -> Dict[int, int]:
         """burst_id → how many of its frames are starred by anyone."""
-        if not rn.stars:
+        stars = _stars_snapshot(rn)
+        if not stars:
             return {}
-        hit = rn.ranked[rn.ranked["path"].astype(str).isin(set(rn.stars))]
+        hit = rn.ranked[rn.ranked["path"].astype(str).isin(stars)]
         return {int(b): int(n) for b, n in hit.groupby("burst_id").size().items()}
 
     # ----------------------------- run loading
@@ -297,9 +314,6 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         if not row or row["status"] != "ready":
             return None
         run_dir = cfg.runs_dir / row["folder"]
-        if not (run_dir / "ranked.csv").exists():
-            return None
-
         for _ in range(10):
             version = read_version(run_dir)
             if version % 2 == 1:
@@ -307,61 +321,63 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
                 time.sleep(0.03)
                 continue
             try:
-                ranked = pd.read_csv(run_dir / "ranked.csv")
-                bursts = pd.read_csv(run_dir / "bursts.csv")
+                outputs = output_dir(run_dir)
+                ranked = pd.read_csv(outputs / "ranked.csv")
+                bursts = pd.read_csv(outputs / "bursts.csv")
             except Exception:  # noqa: BLE001 — mid-rename; retry
                 continue
             rn = LoadedRun(run_id=run_id, run_dir=run_dir, ranked=ranked, bursts=bursts,
-                           version=version, stars=_load_stars(run_dir))
-            npy = run_dir / "search_index.npy"
+                           version=version, star_store=star_stores[run_id],
+                           allowed_paths={str(Path(p).resolve()) for p in ranked["path"]})
+            npy = outputs / "search_index.npy"
             if npy.exists():
                 try:
                     mat = np.load(npy)
                     if mat.ndim == 2 and mat.shape[0] == len(ranked):
                         rn.emb = mat.astype(np.float32)
-                        meta = run_dir / "search_index.json"
+                        meta = outputs / "search_index.json"
                         rn.emb_context = (
                             json.loads(meta.read_text()).get("context_encoder",
                                                              cfg.features.context_encoder)
                             if meta.exists() else cfg.features.context_encoder)
                 except Exception:  # noqa: BLE001
                     pass
-            if "shot_type" in ranked.columns and ranked["shot_type"].astype(str).str.len().gt(0).any():
-                rn.shot_types = ranked["shot_type"].astype(str).to_numpy()
+            if "shot_type" in ranked.columns and ranked["shot_type"].fillna("").str.len().gt(0).any():
+                rn.shot_types = ranked["shot_type"].fillna("").astype(str).to_numpy()
             if read_version(run_dir) != version:
                 continue                      # a batch landed mid-read — retry
-            for pth in ranked["path"]:
-                try:
-                    state["allowed_roots"].add(str(Path(pth).resolve().parent))
-                except Exception:  # noqa: BLE001
-                    pass
             return rn
         return None
 
+    def _run_lock(run_id: int):
+        with runs_lock:
+            return load_locks.setdefault(int(run_id), threading.RLock())
+
     def get_run(run_id: Optional[int]) -> Optional[LoadedRun]:
-        """Cached run, reloaded automatically when its generation has moved on."""
+        """Load once per run; star ownership survives snapshot eviction/reload."""
         if run_id is None:
             return None
-        with runs_lock:
-            rn = runs_cache.get(int(run_id))
-            if rn is not None and read_version(rn.run_dir) == rn.version:
-                runs_cache.move_to_end(int(run_id))
-                return rn
-            previous = rn          # keep as a fallback while a write is in flight
-        # Load outside the lock: reading a run takes ~a second and must not block
-        # every other viewer's request.
-        fresh = _read_run(int(run_id))
-        if fresh is None:
-            # Couldn't get a clean snapshot (a writer is mid-batch). Serving the
-            # previous complete generation is strictly better than an empty view;
-            # the client's poll will pick up the new one a moment later.
-            return previous
-        with runs_lock:
-            runs_cache[int(run_id)] = fresh
-            runs_cache.move_to_end(int(run_id))
-            while len(runs_cache) > RUN_CACHE_MAX:
-                runs_cache.popitem(last=False)
-        return fresh
+        run_id = int(run_id)
+        with _run_lock(run_id):
+            row = db.get(run_id)
+            if not row or row["status"] != "ready":
+                return None
+            if run_id not in star_stores:
+                star_stores[run_id] = StarStore(cfg.runs_dir / row["folder"])
+            with runs_lock:
+                previous = runs_cache.get(run_id)
+                if previous is not None and read_version(previous.run_dir) == previous.version:
+                    runs_cache.move_to_end(run_id)
+                    return previous
+            fresh = _read_run(run_id)
+            if fresh is None:
+                return previous
+            with runs_lock:
+                runs_cache[run_id] = fresh
+                runs_cache.move_to_end(run_id)
+                while len(runs_cache) > RUN_CACHE_MAX:
+                    runs_cache.popitem(last=False)
+            return fresh
 
     def _default_run_id() -> Optional[int]:
         """Fallback for clients that send no run_id: the newest ready run."""
@@ -378,7 +394,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         try:
             run_id = int(raw) if raw not in (None, "") else None
         except (TypeError, ValueError):
-            run_id = None
+            abort(400, description="Invalid run_id")
         return get_run(run_id if run_id is not None else _default_run_id())
 
     def _get_text_encoder(ctx: str):
@@ -460,14 +476,6 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         rn.captured = arr
         return arr
 
-    def _burst_min_times(rn: LoadedRun) -> Dict[int, float]:
-        """burst_id → capture time of its earliest frame."""
-        ct = _capture_times(rn)
-        if ct is None:
-            return {}
-        s = pd.Series(ct, index=rn.ranked.index).groupby(rn.ranked["burst_id"]).min()
-        return {int(b): float(v) for b, v in s.items()}
-
     def _iso(ts: Optional[float]) -> str:
         if ts is None or (isinstance(ts, float) and np.isnan(ts)):
             return ""
@@ -500,21 +508,6 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         except (TypeError, ValueError):
             return 100.0
 
-    def _score_of(row) -> float:
-        v = row.get(SCORE_COL, row.get("score_s1", 0.0))
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return 0.0
-
-    def _burst_rep_shot_map(rn: LoadedRun) -> Dict[int, str]:
-        st = _ensure_shot_types(rn)
-        if st is None:
-            return {}
-        rep = rn.ranked.assign(_shot=st)
-        rep = rep[rep["is_representative"].astype(bool)]
-        return {int(b): str(s) for b, s in zip(rep["burst_id"], rep["_shot"])}
-
     # Warm the cache with the newest ready run so the first request is quick.
     get_run(_default_run_id())
 
@@ -539,10 +532,6 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
             row = db.get(run_id)
             run_dir = cfg.runs_dir / row["folder"]
             run_dir.mkdir(parents=True, exist_ok=True)  # may not exist for server-path ingest
-            (run_dir / "config.json").write_text(json.dumps({
-                "context_encoder": cfg.features.context_encoder,
-                "face_encoder": cfg.features.face_encoder,
-            }, indent=2))
             res = ingest_folder(folder, cfg, run_dir, progress_cb=cb)
             db.update(run_id, status="ready", progress=100.0,
                       n_images=res["n_images"], n_bursts=res["n_bursts"],
@@ -569,8 +558,8 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         # Save f under upload_dir, preserving webkitRelativePath, blocking traversal.
         rel = Path(f.filename or "file")
         dest = (upload_dir / rel).resolve()
-        if not str(dest).startswith(str(upload_dir.resolve())):
-            return  # path-traversal attempt — skip
+        if not dest.is_relative_to(upload_dir.resolve()) or dest == upload_dir.resolve():
+            abort(400, description="Upload filename must stay inside its upload folder.")
         dest.parent.mkdir(parents=True, exist_ok=True)
         f.save(str(dest))
         # Repair the occasional leading-\r\n corruption seen on some upload paths,
@@ -598,32 +587,34 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         Bounding the batch size bounds how many tempfile FDs are open at once —
         the whole point, since werkzeug holds every part open for the request."""
         run_id = int(request.form.get("run_id", "0"))
-        upload_dir = _upload_dir_for(run_id)
-        if upload_dir is None:
-            return jsonify({"error": "Unknown or non-uploading run."}), 400
-        files = request.files.getlist("files")
-        for f in files:
-            _save_within(upload_dir, f)
-        return jsonify({"ok": True, "saved": len(files)})
+        with _run_lock(run_id):
+            upload_dir = _upload_dir_for(run_id)
+            if upload_dir is None:
+                return jsonify({"error": "Unknown or non-uploading run."}), 400
+            files = request.files.getlist("files")
+            for f in files:
+                _save_within(upload_dir, f)
+            return jsonify({"ok": True, "saved": len(files)})
 
     @app.route("/api/upload/finish", methods=["POST"])
     def api_upload_finish():
         """All batches sent → kick off ingestion (single-flight)."""
         run_id = int(request.form.get("run_id", "0"))
-        upload_dir = _upload_dir_for(run_id)
-        if upload_dir is None:
-            return jsonify({"error": "Unknown or non-uploading run."}), 400
-        if not state["ingest_lock"].acquire(blocking=False):
-            return jsonify({"error": "An ingestion is already running. Please wait."}), 409
-        try:
-            db.update(run_id, status="ingesting", message="Starting…")
-            state["cancel_event"].clear()
-            state["active_ingest"] = run_id
-            threading.Thread(target=_do_ingest, args=(run_id, upload_dir), daemon=True).start()
-            return jsonify({"ok": True, "run_id": run_id})
-        except Exception:
-            state["ingest_lock"].release()
-            raise
+        with _run_lock(run_id):
+            upload_dir = _upload_dir_for(run_id)
+            if upload_dir is None:
+                return jsonify({"error": "Unknown or non-uploading run."}), 400
+            if not state["ingest_lock"].acquire(blocking=False):
+                return jsonify({"error": "An ingestion is already running. Please wait."}), 409
+            try:
+                db.update(run_id, status="ingesting", message="Starting…")
+                state["cancel_event"].clear()
+                state["active_ingest"] = run_id
+                threading.Thread(target=_do_ingest, args=(run_id, upload_dir), daemon=True).start()
+                return jsonify({"ok": True, "run_id": run_id})
+            except Exception:
+                state["ingest_lock"].release()
+                raise
 
     # ----------------------------- hot folder
     #
@@ -632,7 +623,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
     # nothing polls it. That keeps the cost proportional to what's actually live
     # rather than to how many shoots have ever been processed.
 
-    def _hot_ingest(batch: List[Path]) -> bool:
+    def _hot_ingest(batch: List[Path], hw=None) -> bool:
         """Fold the watched folder into its run. Returns False if the GPU is busy.
 
         Re-ingests the WHOLE folder rather than just ``batch``: the content cache
@@ -640,24 +631,27 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         ranking correct across the entire shoot instead of stapling new photos on
         the end.
         """
-        hw = state["hotfolder"]
+        hw = hw or state["hotfolder"]
         if hw is None:
-            return True
+            return False
         # Never queue behind a manual upload — decline and retry next tick.
         if not state["ingest_lock"].acquire(blocking=False):
             return False
         run_id = hw.run_id
         try:
-            state["active_ingest"] = run_id
-            row = db.get(run_id)
-            if not row:
-                return True
+            with _run_lock(run_id):
+                row = db.get(run_id)
+                if not row:
+                    hw.stop()
+                    return False
+                state["cancel_event"].clear()
+                state["active_ingest"] = run_id
             run_dir = cfg.runs_dir / row["folder"]
             run_dir.mkdir(parents=True, exist_ok=True)
             first_time = row["status"] != "ready"
 
             def cb(pct: float, msg: str) -> None:
-                if state["cancel_event"].is_set():
+                if state["cancel_event"].is_set() or hw._stop.is_set():
                     raise _Cancelled()
                 state["active_progress"] = {"run_id": run_id, "name": row["name"],
                                             "progress": float(pct), "message": msg}
@@ -668,19 +662,19 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
                     fields["status"] = "ingesting"
                 db.update(run_id, **fields)
 
-            res = ingest_folder(Path(hw.folder), cfg, run_dir, progress_cb=cb)
+            res = ingest_folder(Path(hw.folder), cfg, run_dir, progress_cb=cb,
+                                image_paths=hw.ingest_paths())
             db.update(run_id, status="ready", progress=100.0,
                       n_images=res["n_images"], n_bursts=res["n_bursts"],
                       message=f"Watching — {res['n_images']} images, {res['n_bursts']} bursts.")
             return True
         except _Cancelled:
-            db.update(run_id, message="Hot folder ingest cancelled.")
-            return True
+            hw.stop()
+            db.update(run_id, message="Ingest cancelled; watching stopped.")
+            return False
         except Exception as exc:  # noqa: BLE001
-            # Consume the batch rather than retrying forever: the folder is
-            # re-scanned in full next pass, so nothing is actually lost.
-            db.update(run_id, message=f"Hot folder error: {exc}")
-            return True
+            db.update(run_id, message=f"Hot folder error (will retry): {exc}")
+            raise
         finally:
             state["active_ingest"] = None
             state["active_progress"] = None
@@ -697,7 +691,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         folder = str(data.get("path", "")).strip()
         if not folder:
             return jsonify({"error": "No path given"}), 400
-        fp = Path(folder).expanduser()
+        fp = Path(folder).expanduser().resolve()
         if not fp.is_dir():
             return jsonify({"error": f"Not a directory on the server: {fp}"}), 400
 
@@ -710,10 +704,12 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         run_id = db.create(name, folder="")
         db.update(run_id, folder=f"run{run_id:04d}_{_safe_name(name)}",
                   status="queued", message="Watching folder…")
-        state["cancel_event"].clear()
 
         from .hotfolder import HotFolderWatcher
-        hw = HotFolderWatcher(fp, run_id, _hot_ingest,
+        def ingest_batch(batch):
+            return _hot_ingest(batch, hw)
+
+        hw = HotFolderWatcher(fp, run_id, ingest_batch,
                               scan_interval=float(data.get("scan_interval", 5.0)),
                               batch_cooldown=float(data.get("cooldown", 20.0)))
         state["hotfolder"] = hw
@@ -840,32 +836,42 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
             run_id = int(data.get("run_id", 0))
         except (TypeError, ValueError):
             return jsonify({"error": "Bad run_id"}), 400
-        row = db.get(run_id)
-        if not row:
-            return jsonify({"error": "No such run."}), 404
-        # Refuse while something is writing to it — deleting mid-ingest would
-        # leave a half-written tree and a thread writing into nothing.
-        if state["active_ingest"] == run_id:
-            return jsonify({"error": "That run is being processed right now."}), 409
-        hw = state["hotfolder"]
-        if hw is not None and hw.alive and hw.run_id == run_id:
-            return jsonify({"error": "That run is being watched. Stop watching first."}), 409
+        with _run_lock(run_id):
+            row = db.get(run_id)
+            if not row:
+                return jsonify({"error": "No such run."}), 404
+            # Refuse while something is writing to it — deleting mid-ingest would
+            # leave a half-written tree and a thread writing into nothing.
+            if state["active_ingest"] == run_id:
+                return jsonify({"error": "That run is being processed right now."}), 409
+            hw = state["hotfolder"]
+            if hw is not None and hw.alive and hw.run_id == run_id:
+                return jsonify({"error": "That run is being watched. Stop watching first."}), 409
 
-        run_dir = cfg.runs_dir / row["folder"]
-        # Never delete outside the runs directory, whatever the registry says.
-        try:
-            run_dir.resolve().relative_to(cfg.runs_dir.resolve())
-        except ValueError:
-            return jsonify({"error": "Run folder is outside the runs directory."}), 400
-        removed = False
-        if run_dir.is_dir():
-            shutil.rmtree(run_dir, ignore_errors=True)
-            removed = not run_dir.exists()
-        db.delete(run_id)
-        with runs_lock:
-            runs_cache.pop(run_id, None)
-        return jsonify({"ok": True, "run_id": run_id, "name": row["name"],
-                        "folder_removed": removed})
+            run_dir = cfg.runs_dir / row["folder"]
+            # Never delete outside the runs directory, whatever the registry says.
+            try:
+                run_dir.resolve().relative_to(cfg.runs_dir.resolve())
+            except ValueError:
+                return jsonify({"error": "Run folder is outside the runs directory."}), 400
+            if run_dir.resolve() == cfg.runs_dir.resolve():
+                return jsonify({"error": "Run has no valid folder."}), 400
+            store = star_stores.get(run_id)
+            star_lock = store.lock if store else threading.RLock()
+            with star_lock:
+                removed = False
+                if run_dir.is_dir():
+                    try:
+                        shutil.rmtree(run_dir)
+                        removed = True
+                    except OSError as exc:
+                        return jsonify({"error": f"Could not remove run: {exc}"}), 500
+                db.delete(run_id)
+                with runs_lock:
+                    runs_cache.pop(run_id, None)
+                star_stores.pop(run_id, None)
+            return jsonify({"ok": True, "run_id": run_id, "name": row["name"],
+                            "folder_removed": removed})
 
     @app.route("/api/select_run", methods=["POST"])
     def api_select_run():
@@ -875,6 +881,9 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
                      or request.form.get("run_id", 0))
         rn = get_run(run_id)
         if rn is None:
+            row = db.get(run_id)
+            if row and row["status"] in ("queued", "ingesting", "uploading"):
+                return jsonify({"ok": True, "pending": True, "run_id": run_id}), 202
             return jsonify({"error": "Run not found or not ready."}), 404
         return jsonify({"ok": True, "run_id": run_id, "version": rn.version})
 
@@ -943,90 +952,108 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         except (TypeError, ValueError):
             return False
 
+    def _filtered_frames(rn: LoadedRun, *, quality=True) -> pd.DataFrame:
+        df = rn.ranked.copy()
+        st = _ensure_shot_types(rn)
+        if st is not None:
+            df["_shot"] = st
+        shots = {v for v in request.args.get("shot", "").split(",") if v}
+        if shots and "_shot" in df:
+            df = df[df["_shot"].isin(shots)]
+        subject = request.args.get("subject", "").strip()
+        if subject and "subject_class" in df:
+            df = df[df["subject_class"] == subject]
+        if request.args.get("hero") in ("1", "true", "yes") and "is_hero" in df:
+            df = df[df["is_hero"].astype(bool)]
+        thr = _quality_threshold(rn, _top_pct()) if quality else None
+        if thr is not None:
+            col = SCORE_COL if SCORE_COL in df else "score_s1"
+            df = df[df[col] >= thr]
+        return df
+
+    def _pagination():
+        try:
+            return max(0, int(request.args.get("offset", "0"))), max(1, min(500, int(request.args.get("limit", "50"))))
+        except ValueError:
+            abort(400, description="Offset and limit must be integers.")
+
     @app.route("/api/bursts")
     def api_bursts():
+        offset, limit = _pagination()
         rn = resolve_run()
+        empty = {"bursts": [], "stats": None,
+                 "page": {"offset": offset, "limit": limit, "total_matching": 0}}
         if rn is None:
-            return jsonify({"bursts": [], "stats": None,
-                            "page": {"offset": 0, "limit": 50, "total_matching": 0}})
+            return jsonify(empty)
         if _stale(rn):
-            return jsonify({"bursts": [], "stale": True, "version": rn.version,
-                            "stats": _run_stats(rn),
-                            "page": {"offset": 0, "limit": 0, "total_matching": 0}})
-        bursts: pd.DataFrame = rn.bursts
-        shot_filter = {s for s in request.args.get("shot", "").split(",") if s}
-        subject_filter = request.args.get("subject", "").strip()   # "" | people | stage
-        hero_only = request.args.get("hero") in ("1", "true", "yes")
-        offset = int(request.args.get("offset", "0"))
-        limit = int(request.args.get("limit", "50"))
-
-        df = bursts.copy()
-        # Quality cutoff drops whole moments whose best frame doesn't clear the
-        # bar — a burst represented by a frame you'd never use isn't a moment
-        # worth showing.
-        thr = _quality_threshold(rn, _top_pct())
-        if thr is not None:
-            col = SCORE_COL if SCORE_COL in df.columns else "score_s1"
-            df = df[df[col] >= thr]
-        rep_shot = _burst_rep_shot_map(rn)
-        if rep_shot:
-            df = df.assign(_shot=df["burst_id"].map(lambda b: rep_shot.get(int(b), "")))
-            if shot_filter:
-                df = df[df["_shot"].isin(shot_filter)]
-        if subject_filter and "subject_class" in df.columns:
-            df = df[df["subject_class"].astype(str) == subject_filter]
-        if hero_only and "is_hero" in df.columns:
-            df = df[df["is_hero"].astype(bool)]
-
-        df_all_ids = df["burst_id"].tolist()
-        total = len(df)
-        # sort=time orders bursts by when they were shot rather than by score.
-        # Bursts stay collapsed either way — this only changes their order.
-        tmin: Dict[int, float] = {}
-        if request.args.get("sort") == "time":
-            tmin = _burst_min_times(rn)
-        if tmin:
-            df = df.assign(_t=df["burst_id"].map(lambda b: tmin.get(int(b), float("nan"))))
-            df = df.sort_values(["_t", "burst_rank"], na_position="last")
+            return jsonify({**empty, "stale": True, "version": rn.version,
+                            "stats": _run_stats(rn)})
+        unfurl = request.args.get("unfurl") in ("1", "true", "yes")
+        df = _filtered_frames(rn)
+        score_col = SCORE_COL if SCORE_COL in df else "score_s1"
+        # Choose the displayed frame from the eligible subset, for every sort.
+        df["_rank"] = (rn.ranked[score_col].rank(ascending=False, method="min").loc[df.index]
+                       if unfurl else df["burst_rank"])
+        sort = request.args.get("sort", "rank")
+        if sort == "time":
+            ct = _capture_times(rn)
+            df["_t"] = ct[df.index]
+            df = df.sort_values(["_t", "within_burst_rank"], na_position="last", kind="stable")
+        elif sort == "stars":
+            stars = _stars_snapshot(rn)
+            df["_stars"] = df["path"].map(lambda p: len(stars.get(str(p), ())))
+            df = df.sort_values(["_stars", score_col, "path"], ascending=[False, False, True])
         else:
-            df = df.sort_values("burst_rank")
-        df = df.iloc[offset:offset + limit]
-        star_counts = _starred_counts(rn)
+            df = df.sort_values([score_col, "path"], ascending=[False, True])
+        if not unfurl:
+            df = df.drop_duplicates("burst_id", keep="first")
+        ids = set(df["burst_id"])
+        total = len(df)
+        sizes = rn.ranked.groupby("burst_id").size()
+        counts = _starred_counts(rn)
         me = _viewer()
-        out: List[Dict[str, object]] = []
-        for _, r in df.iterrows():
+        out = []
+        for _, r in df.iloc[offset:offset + limit].iterrows():
+            bid = int(r["burst_id"])
+            flags = _star_flags(rn, str(r["path"]), me)
             out.append({
-                "burst_rank": int(r["burst_rank"]),
-                "burst_id": int(r["burst_id"]),
-                "burst_size": int(r["burst_size"]),
-                "rep_filename": r["filename"],
-                "rep_path": r["path"],
-                "shot_type": str(r.get("_shot", "") or ""),
-                "subject_class": str(r.get("subject_class", "") or ""),
+                "burst_rank": int(r["_rank"]), "burst_id": bid,
+                "burst_size": 1 if unfurl else int(sizes[bid]),
+                "rep_filename": r["filename"], "rep_path": r["path"],
+                "shot_type": str(r.get("_shot", "")),
+                "subject_class": str(r.get("subject_class", "")),
                 "is_hero": bool(r.get("is_hero", False)),
-                "score_s1": float(r.get("score_s1", 0.0)),
-                "score_s12_after_hard": float(r.get("score_s12_after_hard", 0.0)),
-                **_star_flags(rn, str(r["path"]), me),
-                "n_starred": int(star_counts.get(int(r["burst_id"]), 0)),
-                "captured_at": _iso(tmin.get(int(r["burst_id"]))) if tmin else "",
+                "score_s1": float(r["score_s1"]),
+                "score_s12_after_hard": float(r.get(SCORE_COL, r["score_s1"])),
+                **flags,
+                "n_starred": int(flags["starred"]) if unfurl else counts.get(bid, 0),
+                "captured_at": _iso(float(r["_t"])) if "_t" in df else "",
             })
-        return jsonify({"bursts": out,
-                        "stats": _run_stats(rn, visible_bursts=set(df_all_ids), thr=thr),
-                        "version": rn.version,
-                        "page": {"offset": offset, "limit": limit, "total_matching": int(total)}})
+        return jsonify({"bursts": out, "version": rn.version,
+                        "stats": _run_stats(rn, visible_bursts=ids,
+                                            thr=_quality_threshold(rn, _top_pct())),
+                        "page": {"offset": offset, "limit": limit, "total_matching": total}})
 
     @app.route("/api/stars")
     def api_stars():
         """Every starred path in the loaded run — the client mirrors this set so
-        tiles can render their star state without a request per tile."""
+        tiles can render their star state without a request per tile.
+
+        Polled every few seconds (see the client's ``pollStars``) so someone
+        else's star shows up on your screen without a manual reload — the same
+        lightweight loop as the ingest-progress and hot-folder polls, just for
+        stars instead of new photos.
+        """
         rn = resolve_run()
         if rn is None:
-            return jsonify({"mine": [], "others": [], "count": 0, "run_id": None})
+            return jsonify({"mine": [], "others": [], "names": {}, "count": 0, "run_id": None})
         me = _viewer()
-        mine = sorted(p for p, o in rn.stars.items() if me in o)
-        others = sorted(p for p, o in rn.stars.items() if o - {me})
-        return jsonify({"mine": mine, "others": others,
-                        "count": len(rn.stars), "n_mine": len(mine),
+        stars = _stars_snapshot(rn)
+        mine = sorted(p for p, o in stars.items() if me in o)
+        others = sorted(p for p, o in stars.items() if o - {me})
+        names = {p: sorted(_display_name(o) for o in owners) for p, owners in stars.items() if owners}
+        return jsonify({"mine": mine, "others": others, "names": names,
+                        "count": len(stars), "n_mine": len(mine),
                         "n_others": len(others), "run_id": rn.run_id})
 
     @app.route("/api/star", methods=["POST"])
@@ -1044,16 +1071,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
             return jsonify({"error": "Unknown frame for this run."}), 404
         me = _viewer()
         with rn.stars_lock:
-            owners = rn.stars.setdefault(path, set())
-            if want:
-                owners.add(me)
-            else:
-                # Only ever removes your own — a colleague's pick is not yours
-                # to delete by clicking the same tile.
-                owners.discard(me)
-            if not owners:
-                rn.stars.pop(path, None)
-            _save_stars(rn)
+            rn.star_store.set(path, me, want)
             flags = _star_flags(rn, path, me)
             count = len(rn.stars)
         return jsonify({"ok": True, "path": path, "count": count, **flags})
@@ -1071,14 +1089,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
             return jsonify({"error": "No run selected."}), 400
         me = _viewer()
         with rn.stars_lock:
-            cleared = 0
-            for path in list(rn.stars):
-                if me in rn.stars[path]:
-                    rn.stars[path].discard(me)
-                    cleared += 1
-                    if not rn.stars[path]:
-                        rn.stars.pop(path, None)
-            _save_stars(rn)
+            cleared = rn.star_store.clear(me)
             count = len(rn.stars)
         return jsonify({"ok": True, "cleared": cleared, "count": count})
 
@@ -1089,8 +1100,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         Shaped like ``/api/bursts`` rows so the grid renders it unchanged. The
         shot / subject / hero filters still AND in, matching every other view.
         """
-        offset = int(request.args.get("offset", "0"))
-        limit = int(request.args.get("limit", "50"))
+        offset, limit = _pagination()
         page_empty = {"offset": offset, "limit": limit, "total_matching": 0}
         rn = resolve_run()
         if rn is None:
@@ -1105,24 +1115,20 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         # NB: the quality cutoff is deliberately NOT applied here. A star is an
         # explicit human pick; hiding one because the model scored it low would
         # be the tool overruling the person. Shot / subject / hero still apply.
-        sub = ranked[ranked["path"].astype(str).isin(_paths_for_owner(rn, me, owner))].copy()
-        st = _ensure_shot_types(rn)
-        if st is not None and len(sub):
-            sub["_shot"] = st[sub.index]
-        shot_filter = {s for s in request.args.get("shot", "").split(",") if s}
-        if shot_filter and "_shot" in sub.columns:
-            sub = sub[sub["_shot"].isin(shot_filter)]
-        subject_filter = request.args.get("subject", "").strip()
-        if subject_filter and "subject_class" in sub.columns:
-            sub = sub[sub["subject_class"].astype(str) == subject_filter]
-        if request.args.get("hero") in ("1", "true", "yes") and "is_hero" in sub.columns:
-            sub = sub[sub["is_hero"].astype(bool)]
+        sub = _filtered_frames(rn, quality=False)
+        sub = sub[sub["path"].astype(str).isin(_paths_for_owner(rn, me, owner))]
 
         total = int(len(sub))
         sizes = ranked.groupby("burst_id").size()
-        ct = _capture_times(rn) if request.args.get("sort") == "time" else None
+        sort_mode = request.args.get("sort", "rank")
+        ct = _capture_times(rn) if sort_mode == "time" else None
         if ct is not None and len(sub):
             sub = sub.assign(_t=ct[sub.index]).sort_values("_t", na_position="last")
+        elif sort_mode == "stars" and len(sub):
+            # Every row here is already a starred frame, so this ranks them by
+            # their own star count directly — no burst-level aggregation needed.
+            sub = sub.assign(_stars=sub["path"].astype(str).map(lambda p: len(_star_owners(rn, p))))
+            sub = sub.sort_values(["_stars", "burst_rank"], ascending=[False, True])
         else:
             sub = sub.sort_values(["burst_rank", "within_burst_rank"])
         sub = sub.iloc[offset:offset + limit]
@@ -1153,6 +1159,8 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         rn = resolve_run()
         if rn is None:
             abort(404)
+        if _stale(rn):
+            return jsonify({"stale": True, "version": rn.version, "frames": []}), 409
         ranked = rn.ranked
         sub = ranked[ranked["burst_id"] == burst_id].copy()
         if sub.empty:
@@ -1198,12 +1206,15 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
     @app.route("/api/search")
     def api_search():
         q = request.args.get("q", "").strip()
-        offset = int(request.args.get("offset", "0"))
-        limit = int(request.args.get("limit", "50"))
+        unfurl = request.args.get("unfurl") in ("1", "true", "yes")
+        offset, limit = _pagination()
         empty_page = {"offset": offset, "limit": limit, "total_matching": 0}
         rn = resolve_run()
         if rn is None:
             return jsonify({"bursts": [], "page": empty_page, "query": q, "error": "No run selected."})
+        if _stale(rn):
+            return jsonify({"bursts": [], "page": empty_page, "stale": True,
+                            "version": rn.version, "stats": _run_stats(rn)})
         if not q:
             return jsonify({"bursts": [], "page": empty_page, "query": q})
         ranked = rn.ranked
@@ -1219,32 +1230,26 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
             return jsonify({"bursts": [], "page": empty_page, "query": q,
                             "error": f"text encoder unavailable: {exc}"})
 
-        work = ranked.copy()
-        work["_sim"] = rn.emb @ qvec
-        st = _ensure_shot_types(rn)
-        if st is not None:
-            work["_shot"] = st
-        best = work.loc[work.groupby("burst_id")["_sim"].idxmax()].sort_values("_sim", ascending=False)
+        work = _filtered_frames(rn)
+        work["_sim"] = (rn.emb @ qvec)[work.index]
+        # Normally one hit per burst (its best-matching frame), so a search
+        # doesn't return eight near-identical copies of one moment. Unfurled,
+        # there's no grouping to collapse into — every frame competes on its
+        # own match to the query.
+        if unfurl:
+            best = work.sort_values("_sim", ascending=False)
+        else:
+            best = work.loc[work.groupby("burst_id")["_sim"].idxmax()].sort_values("_sim", ascending=False)
 
-        shot_filter = {s for s in request.args.get("shot", "").split(",") if s}
-        if shot_filter and "_shot" in best.columns:
-            best = best[best["_shot"].isin(shot_filter)]
-        subject_filter = request.args.get("subject", "").strip()
-        if subject_filter and "subject_class" in best.columns:
-            best = best[best["subject_class"].astype(str) == subject_filter]
-        if request.args.get("hero") in ("1", "true", "yes") and "is_hero" in best.columns:
-            best = best[best["is_hero"].astype(bool)]
-
-        thr = _quality_threshold(rn, _top_pct())
-        if thr is not None:
-            col = SCORE_COL if SCORE_COL in best.columns else "score_s1"
-            best = best[best[col] >= thr]
         star_counts = _starred_counts(rn)
         me = _viewer()
-        # Search collapses each burst to its best-matching frame, which may not be
-        # the starred one — so "starred" here means "this burst holds a star".
         if request.args.get("starred") in ("1", "true", "yes"):
-            best = best[best["burst_id"].astype(int).isin(star_counts)]
+            picked = _paths_for_owner(rn, me, request.args.get("owner", "all"))
+            if unfurl:
+                best = best[best["path"].astype(str).isin(picked)]
+            else:
+                picked_bursts = ranked.loc[ranked["path"].astype(str).isin(picked), "burst_id"]
+                best = best[best["burst_id"].isin(picked_bursts)]
 
         sizes = ranked.groupby("burst_id").size()
         total = int(len(best))
@@ -1252,10 +1257,11 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         out: List[Dict[str, object]] = []
         for _, r in page.iterrows():
             bid = int(r["burst_id"])
+            star_flags = _star_flags(rn, str(r["path"]), me)
             out.append({
                 "burst_rank": int(r["burst_rank"]),
                 "burst_id": bid,
-                "burst_size": int(sizes.get(bid, 1)),
+                "burst_size": 1 if unfurl else int(sizes.get(bid, 1)),
                 "rep_filename": r["filename"],
                 "rep_path": r["path"],
                 "shot_type": str(r.get("_shot", "") or ""),
@@ -1265,29 +1271,31 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
                 "score_s12_after_hard": float(r.get("score_s12_after_hard", 0.0)),
                 "relevance": float(r["_sim"]),
                 "match_within_burst_rank": int(r.get("within_burst_rank", 1)),
-                **_star_flags(rn, str(r["path"]), me),
-                "n_starred": int(star_counts.get(bid, 0)),
+                **star_flags,
+                "n_starred": int(star_flags["starred"]) if unfurl else int(star_counts.get(bid, 0)),
             })
         return jsonify({"bursts": out, "stats": _run_stats(rn), "version": rn.version, "query": q,
                         "page": {"offset": offset, "limit": limit, "total_matching": total}})
 
     # ----------------------------- image serving
 
-    def _check_allowed(p: str) -> Path:
+    def _check_allowed(p: str, rn: Optional[LoadedRun] = None) -> Path:
+        rn = rn or resolve_run()
+        if rn is None:
+            abort(404)
         try:
             real = Path(p).resolve()
         except Exception:
             abort(400)
-        if str(real.parent) not in state["allowed_roots"]:
+        if str(real) not in rn.allowed_paths:
             abort(403)
         if not real.is_file():
             abort(404)
         return real
 
-    # Uploaded files never change under a given path, so let browsers cache
-    # thumbnails/previews aggressively — re-scrolling and re-opening become
-    # instant instead of re-fetching over the (possibly slow) network.
-    _CACHE_HDR = "public, max-age=604800, immutable"
+    # Private browser caching keeps repeat browsing fast without sharing
+    # authenticated images through intermediary caches.
+    _CACHE_HDR = "private, max-age=3600"
 
     @app.route("/img")
     def img():
@@ -1380,7 +1388,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
                 continue
             seen.add(p)
             if Path(p).is_file():
-                paths.append(p)
+                paths.append(str(_check_allowed(p, rn)))
             else:
                 missing += 1
         if not paths:
@@ -1393,7 +1401,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         token = secrets.token_urlsafe(18)
         with _dl_lock:
             _prune_tokens()
-            _dl_tokens[token] = {"paths": paths, "filename": f"{label}_{kind}.zip",
+            _dl_tokens[token] = {"paths": paths, "run_id": rn.run_id, "filename": f"{label}_{kind}.zip",
                                  "expires": time.time() + _DL_TTL}
         return jsonify({"ok": True, "token": token, "count": len(paths),
                         "bytes": int(total), "missing": missing,
@@ -1413,7 +1421,10 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
             entry = _dl_tokens.get(token)
         if entry is None:
             abort(404)
-        paths: List[str] = list(entry["paths"])  # type: ignore[arg-type]
+        rn = get_run(int(entry["run_id"]))
+        if rn is None:
+            abort(404)
+        paths = [str(_check_allowed(p, rn)) for p in entry["paths"]]
         names = _zip_arcnames(paths)
 
         class _Funnel:
@@ -1461,8 +1472,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         resp.headers["Cache-Control"] = "no-store"
         return resp
 
-    _thumb_cache: Dict[Tuple[str, int], bytes] = {}
-    _thumb_order: List[Tuple[str, int]] = []
+    _thumb_cache = OrderedDict()
     _thumb_lock = threading.Lock()
     _THUMB_MAX = 4096                    # entries
     _THUMB_MAX_BYTES = 256 * 1024 * 1024  # 256 MB
@@ -1484,8 +1494,12 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
             w = max(64, min(2048, int(request.args.get("w", "320"))))
         except ValueError:
             w = 320
-        key = (str(real), w)
-        hit = _thumb_cache.get(key)
+        stat = real.stat()
+        key = (str(real), w, stat.st_size, stat.st_mtime_ns)
+        with _thumb_lock:
+            hit = _thumb_cache.get(key)
+            if hit is not None:
+                _thumb_cache.move_to_end(key)
         if hit is None:
             from .imaging import open_image
             with open_image(real) as im:  # context-managed so the FD is closed
@@ -1500,14 +1514,12 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
             with _thumb_lock:
                 if key not in _thumb_cache:
                     _thumb_cache[key] = hit
-                    _thumb_order.append(key)
                     _thumb_bytes += len(hit)
-                while _thumb_order and (
-                    len(_thumb_order) > _THUMB_MAX or _thumb_bytes > _THUMB_MAX_BYTES
+                while _thumb_cache and (
+                    len(_thumb_cache) > _THUMB_MAX or _thumb_bytes > _THUMB_MAX_BYTES
                 ):
-                    evicted = _thumb_cache.pop(_thumb_order.pop(0), None)
-                    if evicted is not None:
-                        _thumb_bytes -= len(evicted)
+                    _, evicted = _thumb_cache.popitem(last=False)
+                    _thumb_bytes -= len(evicted)
         return Response(hit, mimetype="image/jpeg",
                         headers={"Cache-Control": _CACHE_HDR})
 
@@ -1565,12 +1577,102 @@ def _open_firewall(port: int) -> None:
         print(f"[firewall] auto-open failed ({e}); run once:  sudo ufw allow {port}/tcp")
 
 
+def _ensure_self_signed_cert(cfg: Config, extra_ip: Optional[str] = None) -> Tuple[str, str]:
+    """A self-signed TLS cert/key, generated once and reused after that.
+
+    Export's folder-picker (the File System Access API) only works in a
+    browser "secure context" — HTTPS, or localhost. A plain-http LAN address
+    doesn't count, even in Chrome, so there's no way to make Export work for
+    remote viewers without HTTPS. The cert doesn't need to be real: browsers
+    treat any TLS connection as secure once the visitor clicks through the
+    "not private" warning — they just don't trust the issuer. Self-signed is
+    enough, and doesn't need a domain name or a CA.
+    """
+    ssl_dir = cfg.data_root / "ssl"
+    cert_path, key_path = ssl_dir / "cert.pem", ssl_dir / "key.pem"
+    if cert_path.exists() and key_path.exists():
+        return str(cert_path), str(key_path)
+    ssl_dir.mkdir(parents=True, exist_ok=True)
+    openssl = shutil.which("openssl")
+    if not openssl:
+        raise SystemExit(
+            "--https needs the `openssl` command-line tool, which wasn't found. "
+            "Install it (e.g. `apt install openssl`) or run without --https.")
+    san = "DNS:localhost,IP:127.0.0.1"
+    if extra_ip:
+        san += f",IP:{extra_ip}"
+    r = subprocess.run([
+        openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", str(key_path), "-out", str(cert_path),
+        "-days", "3650", "-subj", "/CN=image-filterer",
+        "-addext", f"subjectAltName={san}",
+    ], capture_output=True, text=True)
+    if r.returncode != 0:
+        for p in (cert_path, key_path):
+            p.unlink(missing_ok=True)
+        raise SystemExit(f"Could not generate a self-signed certificate:\n{r.stderr}")
+    try:
+        key_path.chmod(0o600)
+    except OSError:
+        pass
+    return str(cert_path), str(key_path)
+
+
+def _serve(app: Flask, host: str, port: int, ssl_context: Optional[Tuple[str, str]]) -> None:
+    """Run the dev server — plain HTTP, or HTTPS with the handshake moved out
+    of the shared accept loop.
+
+    Werkzeug's normal ``ssl_context=`` handling wraps the LISTENING socket, so
+    the TLS handshake runs inside ``accept()`` itself — in the single shared
+    accept loop, before any per-connection thread exists, ``threaded=True``
+    notwithstanding. One client with a stalled or abandoned handshake (browsers
+    routinely open speculative connections that never complete, and a visitor
+    sitting on the self-signed warning dialog holds one open too) then wedges
+    *every other client* for as long as that connection sits open — observed
+    directly: a single silently-held-open connection was enough to hang every
+    subsequent request indefinitely, with no recovery short of restarting the
+    process.
+
+    The fix: keep the listening socket plain TCP and defer the SSL wrap to
+    ``finish_request()``, which Werkzeug's ``ThreadingMixIn`` already calls
+    inside a fresh thread per connection — so a stuck handshake only ties up
+    its own thread, never the shared accept loop that everyone else depends on.
+    """
+    if ssl_context is None:
+        app.run(host=host, port=port, debug=False, threaded=True)
+        return
+
+    from werkzeug.serving import load_ssl_context, make_server
+
+    ssl_ctx = load_ssl_context(*ssl_context)
+    server = make_server(host, port, app, threaded=True)  # plain TCP listener
+    orig_finish_request = server.finish_request
+
+    def finish_request(request, client_address):
+        try:
+            request = ssl_ctx.wrap_socket(request, server_side=True)
+        except Exception:
+            return  # abandoned or invalid handshake — drop it, not a crash
+        orig_finish_request(request, client_address)
+
+    server.finish_request = finish_request
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
 def main() -> None:
     ap = argparse.ArgumentParser("image_filterer.server")
     ap.add_argument("--host", type=str, default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8600)
     ap.add_argument("--open-firewall", action="store_true",
                     help="Best-effort `ufw allow <port>/tcp` on launch (needs passwordless sudo).")
+    ap.add_argument("--https", action="store_true",
+                    help="Serve over self-signed HTTPS. Needed for the Export folder-picker to "
+                         "work for anyone connecting over the LAN rather than from localhost — "
+                         "browsers require a secure context for it, and plain http doesn't count. "
+                         "Each browser sees a one-time 'not private' warning to click through.")
     args = ap.parse_args()
     cfg = default_config()
     if not cfg.model_path.exists():
@@ -1593,11 +1695,22 @@ def main() -> None:
         print("  auth:   NONE — anyone with the link can browse and edit. "
               "Set IMAGE_FILTERER_PASSWORD before sharing this.")
     print(f"  data:   {cfg.data_root}   (set IMAGE_FILTERER_DATA_ROOT to change)")
-    print(f"  local:  http://127.0.0.1:{args.port}/")
+
+    ssl_context = None
+    scheme = "http"
+    if args.https:
+        ssl_context = _ensure_self_signed_cert(cfg, extra_ip=ip if listens_all else None)
+        scheme = "https"
+        print("  export: enabled (self-signed HTTPS) — each browser will ask to trust it once; "
+              "click through the warning ('Advanced' → 'Proceed').")
+    else:
+        print("  export: browser folder-picker only works from http://localhost — everyone else "
+              "gets a .zip download. Pass --https to enable it for remote viewers too.")
+    print(f"  local:  {scheme}://127.0.0.1:{args.port}/")
     if listens_all:
-        print(f"  remote: http://{ip}:{args.port}/")
+        print(f"  remote: {scheme}://{ip}:{args.port}/")
         print(f"  if a remote host can't connect, open the port once:  sudo ufw allow {args.port}/tcp")
-    app.run(host=args.host, port=args.port, debug=False, threaded=True)
+    _serve(app, args.host, args.port, ssl_context)
 
 
 if __name__ == "__main__":

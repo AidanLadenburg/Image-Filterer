@@ -213,7 +213,7 @@ does; DINOv2 and C-RADIO don't, and search is disabled if you switch to them.
 | **VLM pairwise tournament** (stage 3) | Worked — a hosted VLM behind an internal API gateway, Swiss-style pairings with Bradley-Terry aggregation — but cost $1–2 per run and traded away AUC. Removed from the production path. |
 | **Must-find as a third class** | Improves recall of memorized must-finds, doesn't generalize past a 0.1 pair fraction. Off. |
 | **SigLIP body-crop embedding** | The pose ablation showed it doesn't earn its inference cost. Off; saves one encoder pass per image. |
-| **Valence/arousal (HSEmotion)** | Never installed; the channel was zeros for the entire project. Removed rather than left dangling. |
+| **Valence/arousal (HSEmotion)** | Off in production; its optional experimental channel is excluded from the shipped ranker. |
 | **Face-geometry shot classification** | Killed by the 2% detection rate. Replaced by the zero-shot axis. |
 | **Soft technical penalty** (`alpha > 0`) | Hurt must-find recall — face-quality metrics are unreliable when the face is small. Set to 0. |
 

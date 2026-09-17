@@ -4,8 +4,9 @@ Two encoder families:
 
 * **Context** — global frame / body crop. Defaults to SigLIP2 SO400M; supports
   C-RADIOv4-SO400M for high-res and DINOv2-giant as an alternate.
-* **Face** — face crop. Tries FaRL (Microsoft, CLIP pretrained on 20M LAION face
-  captions) first; falls back to SigLIP2 if FaRL weights aren't available.
+* **Face** — face crop. Defaults to FaRL (Microsoft, CLIP pretrained on 20M
+  LAION face captions). Missing weights fail explicitly to preserve the trained
+  ranker’s feature space.
 
 Outputs are L2-normalized float32 row vectors.
 """
@@ -389,15 +390,6 @@ def build_text_encoder(context_encoder_name: str) -> TextEncoder:
     return TextEncoder(name=n, device=device, embed_dim=dim, model=model, tokenizer=tokenizer)
 
 
-def build_face_encoder_with_fallback(name: str) -> FrozenEncoder:
-    """Try the requested face encoder; on failure, fall back to SigLIP2."""
-    try:
-        return build_encoder(name, role="face")
-    except Exception as e:  # noqa: BLE001
-        if name == "siglip2_so400m_14":
-            raise
-        warnings.warn(
-            f"Face encoder {name!r} failed to load ({e}); falling back to siglip2_so400m_14.",
-            stacklevel=2,
-        )
-        return build_encoder("siglip2_so400m_14", role="face")
+def build_face_encoder(name: str) -> FrozenEncoder:
+    """Load the requested feature space or fail with its original error."""
+    return build_encoder(name, role="face")

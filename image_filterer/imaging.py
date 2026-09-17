@@ -99,17 +99,41 @@ def sanitize_image_file(path, max_lead: int = 8) -> bool:
 
 
 def is_decodable(path) -> bool:
-    """True if the file can be opened as an image (cheap; no full decode).
+    """True only if the pixel data can actually be decoded.
 
     For RAW this pulls the embedded preview, which is also the honest test: a
     RAW whose preview can't be read is one we can't ingest.
     """
     try:
-        if is_raw(path):
-            open_image(path).close()
-            return True
-        with Image.open(path) as im:
-            im.verify()
+        with open_image(path) as im:
+            im.load()
         return True
     except Exception:
         return False
+
+
+def validated_images(paths, run_dir):
+    """Decode each unchanged source only once, including during live updates."""
+    import json
+    from .pipeline import atomic_write
+    cache_path = run_dir / "validated.json"
+    try:
+        previous = json.loads(cache_path.read_text())
+    except (OSError, ValueError):
+        previous = {}
+    valid, signatures = [], {}
+    for p in paths:
+        try:
+            st = p.stat()
+            signature = [st.st_size, st.st_mtime_ns]
+            if previous.get(str(p)) != signature and not is_decodable(p):
+                continue
+            after = p.stat()
+            if signature != [after.st_size, after.st_mtime_ns]:
+                continue
+        except OSError:
+            continue
+        valid.append(p)
+        signatures[str(p)] = signature
+    atomic_write(cache_path, lambda tmp: tmp.write_text(json.dumps(signatures)))
+    return valid

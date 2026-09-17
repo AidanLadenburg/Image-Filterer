@@ -23,12 +23,14 @@
 | | |
 |---|---|
 | **Browse by rank** | Best-guess keepers first, one tile per moment. |
-| **Browse by time** | Switch the **Sort** dropdown to *Chronological* to walk the event start to finish. |
+| **Browse by time** | Switch the **Sort** dropdown to *Chronological* to walk the event start to finish — each tile shows its burst's earliest frame. |
+| **Browse by stars** | Switch **Sort** to *Most starred* to bring moments with your team's picks to the top — each tile shows the most-starred frame in its burst. |
 | **Search in plain English** | Type "person at a podium", "robot on stage", "wide shot of the crowd". No tags or keywords needed. |
 | **Filter** | By framing (wide / medium / close), by subject (people / stage), or to solo hero shots only. |
+| **Ungroup** | Click the **Ungroup** pill to turn off burst grouping — one tile per photo instead of one per burst, everything else (search, filters, sort, quality, stars) still applies. |
 | **Open a moment** | Click a tile to see every frame in that burst, ordered best-first or chronilogical, and step through with ← / →. |
-| **Star the ones you want** | Click ☆ on any tile or frame. Stars are saved and shared with everyone looking at the same shoot. |
-| **Download** | One photo, your starred set, or a hand-picked selection using select mode |
+| **Star the ones you want** | Click ☆ on any tile or frame. Stars are saved and shared with everyone looking at the same shoot — a colleague's star shows up on your screen within a few seconds, no reload needed. |
+| **Export** | Original photos, individually or in bulk, sent to the local folder or browser download destination chosen in Settings. |
 | **Quality slider** | Hide everything below a chosen band so only the strongest photos remain. |
 | **Resize the grid** | Make thumbnails bigger or smaller with the **Size** control or the `+` / `−` keys. |
 | **Watch a folder** | Point it at a shared folder during a live event and photos are added as they arrive. |
@@ -82,21 +84,38 @@ through the whole event and take the update when it suits you.
 A chip in the header shows it's running. Click **Stop watching** when the event
 is over — it also stops itself after a few quiet hours.
 
-### Starring and downloading
+### Starring and exporting
 
 Hover a tile and click **☆** to star it. Click **★ Starred** in the header to
 see only the starred frames, where you'll also find:
 
-- **⬇ Download all N starred** — everything starred, as one `.zip`
-- **☆ Clear all N** — unstar everything (asks first; this affects everyone)
+- **Export all N starred** — sends starred originals to your selected destination
+- **☆ Clear my stars** — removes your picks (asks first); colleagues’ stars stay saved
 
-For a one-off, click **⬇** in the bottom-right of any tile. To grab a specific
-set, click **☑ Select**, click the tiles you want, then **⬇ Download N
-selected**.
+Open **⚙ Settings → Export location** at any time, including before loading a
+shoot. Choose a local folder or use browser downloads.
+Tile download buttons, the viewer download button, the **D** shortcut, starred
+exports, and **☑ Select → Export N selected** all use that destination.
+Settings also holds thumbnail size, burst grouping (**Ungroup**), and your
+display name; filtering and sorting remain in a fixed toolbar row. On narrow screens, scroll
+that row horizontally to reach all filters; controls never wrap into new rows.
+Search uses a dedicated second row on small screens, while Upload and Settings
+stay beside the shoot selector.
 
-**Every download is the full-resolution original file** — the same bytes off the
-card. The images on screen are small stand-ins so the page loads quickly, but
-that's never what you get when you download.
+**Local folders:** Chrome or Edge on HTTPS or localhost can remember a folder
+across visits. The browser may ask you to authorize it again. Identical files
+are skipped; different photos sharing a filename receive a numbered suffix.
+An existing remembered export folder is preserved when upgrading.
+
+**Browser downloads:** individual images download normally and bulk selections
+use ZIP. The destination follows the browser's download preferences; browser
+security prevents this app from assigning an arbitrary local path. This option
+works without the local folder API. An unavailable local destination must be
+changed explicitly in Settings.
+
+**Every export or download is the full-resolution original file** — the same
+bytes off the card. The images on screen are small stand-ins so the page
+loads quickly, but that's never what you get when you export or download.
 
 ### Keyboard shortcuts
 
@@ -170,8 +189,9 @@ best one is shown. Click the tile to see the whole group — the count is on the
 tile ("8 frames").
 
 **Two shots of the same moment appear as separate tiles.**
-Expected. Frames from two different cameras are never merged, so two
-photographers shooting the same gesture produce two bursts.
+Frames with distinct camera identities stay separate. When EXIF has no body
+serial, identity falls back to body/lens information; matching camera setups can
+still merge.
 
 **Does starring change the ranking?**
 No. Stars are just a list you're keeping. They don't teach the system anything —
@@ -181,7 +201,7 @@ find it useful.
 **Can other people see my stars?**
 Yes — and you can tell them apart. **Your stars are gold, everyone else's are
 blue.** In the starred view, the **All / Mine / Others** buttons narrow it down,
-and the download button follows whichever you've picked.
+and the Export button follows whichever you've picked.
 
 Starring is per-person: clicking a frame a colleague starred adds your star
 alongside theirs rather than removing it, and **Clear my stars** only ever
@@ -193,7 +213,7 @@ view. The one exception is **Load more**: once new photos exist, the button asks
 you to reload first, because paging further would otherwise mix two different
 orderings and skip photos.
 
-**Is the photo I download the full-quality one?**
+**Is the photo I download or export the full-quality one?**
 Yes, always — the original file, untouched. What you see in the grid and preview
 are smaller copies made for speed.
 
@@ -271,8 +291,152 @@ export IMAGE_FILTERER_CACHE_DIR=/path/to/old/cache
 Verify the install:
 
 ```bash
-pip install -e ".[dev]" && pytest        # smoke tests, no GPU or weights needed
+pip install -e ".[dev]" && pytest        # smoke + regression tests, no inference needed
+node --test tests/test_ui.cjs             # browser logic; Node 18+, no npm install
 ```
+
+## NVIDIA DGX Spark: Docker installation
+
+Use this installation path on DGX Spark instead of the CUDA 12.1 / native venv
+example above. `start.sh` remains the native launcher; **`start-spark.sh` is the
+Docker launcher**. Run the commands below from the repository root.
+
+The image starts from NVIDIA's ARM64 PyTorch `25.11-py3` image, also used in
+[NVIDIA's Spark playbook](https://github.com/NVIDIA/dgx-spark-playbooks/blob/main/nvidia/pytorch-fine-tune/assets/docker-compose.yml).
+It preserves that image's exact Torch and TorchVision versions during installation
+and records the resolved Python environment at `/opt/image-filterer-environment.txt`.
+The remaining dependencies are resolved at build time: this is not a complete
+lockfile. Keep the successfully tested image for the event; do not rebuild it on
+event day. You can pin `SPARK_BASE_IMAGE` to a validated image digest as well.
+
+**Validation status:** this deployment recipe must pass the checks below on your
+Spark before live use. Repository tests alone do not validate ARM64 native
+libraries, Blackwell inference, or your LucidLink mount.
+
+### 1. Prepare the host and configuration
+
+Use the Spark's supported NVIDIA driver and NVIDIA Container Toolkit, with Docker
+Engine and the Compose v2 plugin available to your login account. Check:
+
+```bash
+nvidia-smi
+docker version
+docker compose version
+cp .env.spark.example .env.spark
+chmod 600 .env.spark
+id -u
+id -g
+```
+
+Edit `.env.spark`:
+
+- Set a real `IMAGE_FILTERER_PASSWORD` (single-quote it to preserve literal `$`).
+- Set `LUCIDLINK_PATH` to the **absolute host path** of the mounted event folder.
+- Set `SPARK_DATA_DIR` to an **absolute directory on the Spark's local SSD**.
+- Set `SPARK_UID` and `SPARK_GID` to the numeric IDs printed above. This account
+  must be able to read LucidLink and write the local data directory.
+- Optionally change the host port (`SPARK_PORT`, default 8600) or listening IP.
+
+Create the local directory yourself, owned by that account, for example:
+
+```bash
+mkdir -p /home/YOUR_USER/image-filterer-data
+```
+
+Use that exact path in `SPARK_DATA_DIR`. Docker deliberately refuses to create
+missing bind-mount source directories, helping catch typos. Do not put the
+application database or caches on LucidLink. `.env.spark` is ignored by Git and
+excluded from the image build context; it contains your shared password.
+
+**Mount LucidLink before running setup or starting the container.** Docker exposes
+that folder read-only at `/photos`. LucidLink/FUSE permissions must permit access
+from the configured container UID; a successful host `ls` alone does not prove
+container access. Follow your LucidLink administrator's supported mount/access
+configuration if permission is denied. Avoid changing mount permissions blindly.
+If LucidLink is unmounted/remounted, recreate the container afterward with
+`bash start-spark.sh up --force-recreate`. A container restart policy does not
+wait for LucidLink to mount after a host reboot.
+
+### 2. Build, download models, and test inference
+
+```bash
+bash start-spark.sh build
+bash start-spark.sh setup
+```
+
+Setup downloads the third-party weights and runs the full image encoder, face
+encoder/detector, ranker, scene detector, and text encoder on a synthetic image.
+It also checks CUDA matrix operations and TorchVision's CUDA NMS extension.
+Downloads persist under `SPARK_DATA_DIR`, including the Hugging Face cache.
+Internet access is needed for the build and initial downloads.
+
+Then test actual files from the LucidLink mount (container paths, not host paths):
+
+```bash
+bash start-spark.sh check --sample '/photos/example-person.jpg'
+bash start-spark.sh check --sample '/photos/example-camera.CR3'
+```
+
+Use a clear face photo and a RAW file from each camera format you intend to use.
+These checks force fresh feature extraction and test EXIF reading. A synthetic
+probe cannot establish that real faces or your camera's RAW files work. Check the
+reported `face_detected` result on the face photo. If setup/check fails, resolve
+that error before starting the live event; disabling face extraction changes the
+feature inputs expected by the shipped ranking model.
+
+The build requires network access to NVIDIA NGC and Python package repositories.
+It never installs a replacement host NVIDIA driver. A framework dependency
+conflict should fail the build rather than silently replace NVIDIA's Torch pair.
+
+### 3. Start and use the server
+
+```bash
+bash start-spark.sh up
+bash start-spark.sh status
+bash start-spark.sh logs
+```
+
+Open **`https://SPARK_LAN_IP:8600`** from viewers' computers (or your configured
+host port). HTTPS uses the app's self-signed certificate; browsers will need to
+accept/trust it. For a managed deployment, use a trusted certificate/reverse
+proxy. Allow the selected TCP port on the host/network firewall as needed; the
+container does not modify the host firewall. Configure Docker-published-port
+access at the host/network level rather than assuming a UFW rule alone restricts
+Docker traffic.
+
+In **Watch a folder**, enter **`/photos`**, or a subfolder such as
+`/photos/day-one`. Files copied into LucidLink by photographers appear through
+this mount and are picked up by the watcher. The browser upload feature creates
+separate shoots and is not needed for this workflow.
+
+This Compose deployment runs **one application container**. Do not scale it:
+watchers and ingestion locks are process-local. The container runs as your
+configured UID rather than root. Local storage persists across rebuilds and
+`down`; the LucidLink originals are mounted read-only.
+
+```bash
+bash start-spark.sh down                  # stop; keep local data and models
+bash start-spark.sh up                    # start again
+bash start-spark.sh up --force-recreate   # apply environment or mount changes
+```
+
+The health check tests HTTPS responsiveness, not GPU throughput or mount health.
+Startup checks GPU kernels and required asset files, but does not repeat the full
+model check. Restarting the container **does not restore an active hot-folder
+watch**; starting another watch currently creates a new shoot. The restart policy
+restarts an exited container, not an unhealthy-but-running one.
+
+To preserve installation details after a successful rehearsal:
+
+```bash
+docker compose --env-file .env.spark -f compose.spark.yaml run --rm --no-deps \
+  --entrypoint cat image-filterer /opt/image-filterer-environment.txt > spark-environment.txt
+```
+
+Before upgrading, stop the service and back up `SPARK_DATA_DIR` (it includes the
+registry, stars, uploads, model caches, and HTTPS/session state). Commit and push
+all intended application files before pulling on the Spark; local untracked
+files will not transfer through Git.
 
 ## Configuration
 
@@ -343,8 +507,9 @@ image-filterer-server --host 0.0.0.0 --port 8600
 
 Every route is gated except the login page itself; unauthenticated requests to
 `/` get a login form and everything else gets a `401`. A session lasts 18
-hours (covers a full event day) and survives server restarts — the signing
-key is written once to `$IMAGE_FILTERER_DATA_ROOT/.session_secret`.
+hours from login and survives server restarts with the same password — the signing
+key is written once to `$IMAGE_FILTERER_DATA_ROOT/.session_secret`. Changing the
+password invalidates existing sessions; background polling does not extend them.
 
 This is one shared password for everyone, not per-user accounts — it's meant
 to keep the link from being useful to someone who doesn't have it, not to
@@ -354,6 +519,35 @@ and once set, a display name shows up wherever a frame lists who starred it.
 There's no server-side verification that a name is who it claims — anyone can
 type any name, same trust model as the shared password.
 
+### Serving over HTTPS (for Export)
+
+```bash
+image-filterer-server --host 0.0.0.0 --port 8600 --https
+```
+
+Local-folder export (see [Starring and exporting](#starring-and-exporting)) uses the
+browser's File System Access API to write straight into a folder on the
+viewer's machine. That API only works in a "secure context" — HTTPS, or
+`http://localhost` — which a plain LAN address never satisfies, even in
+Chrome. `--https` makes the server generate (once) a self-signed certificate
+and key under `$IMAGE_FILTERER_DATA_ROOT/ssl/`, reused on every future start,
+and serve over TLS with it. `start.sh` passes this by default.
+
+Self-signed means each browser shows a "your connection isn't private"
+interstitial the first time — that's expected, not a sign anything is broken.
+Click **Advanced → Proceed to `<host>` (unsafe)**; the browser remembers that
+choice afterward. Requires the `openssl` CLI tool (already present on most
+Linux/macOS installs); without it, `--https` exits with a clear error instead
+of silently falling back to plain HTTP.
+
+This is not the same guarantee a real certificate gives you — anyone on the
+network could in principle present their own self-signed cert for the same
+address and a careless "Proceed anyway" click would trust it. For a shoot on
+a network you don't fully control, a real certificate (e.g. via a reverse
+proxy and Let's Encrypt, or your organization's internal CA) is the more
+correct fix; self-signed is the pragmatic one for a LAN tool used for a few
+hours at an event.
+
 ### Watching a folder (hot folder)
 
 ```
@@ -362,8 +556,9 @@ POST /api/hotfolder/stop
 GET  /api/hotfolder         status
 ```
 
-Starting a watch creates a run bound to that folder and re-ingests the **whole
-folder** on each batch — the content cache makes known frames nearly free, and it
+Starting a watch creates a run bound to that folder and scans its subfolders too.
+Each batch re-ingests **all stable photos** — files still copying wait for a later
+batch. The content cache avoids re-extracting known frames, and this
 keeps bursts, dedup and ranking correct across the shoot rather than stapling new
 photos onto the end.
 
@@ -379,8 +574,9 @@ become one pass. The scan eases to 30 s after ten quiet minutes and snaps back o
 first sight of a new file. One watcher at a time; it stops itself after ~6 hours
 idle so a forgotten watch can't poll a cloud mount forever.
 
-Unreadable files (sidecars, RAW without a preview) are remembered as such and not
-re-examined every tick.
+Unreadable files are remembered until their size or modification time changes,
+so a repaired copy gets another chance. Failed batches remain queued and retry
+after the cooldown. Cancelling a watched ingest stops the watch as well.
 
 ### Behavior under load
 
@@ -392,10 +588,11 @@ re-examined every tick.
   can't be safely hard-killed.)
 - **Run selection is per-viewer.** Runs are cached by id, so two people can
   browse different shoots at once without disturbing each other.
-- **Batches publish atomically.** Outputs are written to temp files and renamed,
-  bracketed by a seqlock in `version.json`; readers take a consistent snapshot or
-  retry, so a re-ingest can run while people browse. Clients send the version
-  they paged from and are told to reload rather than served a mixed ordering.
+- **Batches publish atomically.** A complete generation is written before an
+  atomic `current` symlink switch publishes it. A failed write leaves the last
+  committed generation readable, including after a restart. The previous
+  generation is retained for readers already using it. Browsing, search and
+  burst details reject outdated versions and offer Reload.
 - **Content hashes are memoised** on `(path, size, mtime_ns)` in
   `$CACHE_DIR/sha1_memo.db`. Re-checking a known 3,300-frame folder drops from
   ~17 s of reads to ~0.02 s — without this, polling a folder is unusable.
@@ -404,14 +601,15 @@ re-examined every tick.
   shared.
 - **Tuned for remote viewing** — grid thumbnails are ~6–8 KB at the default zoom
   and opening a photo streams a ~1600px preview (~150–300 KB) rather than the
-  8 MB original. Both are sent `Cache-Control: immutable`. The thumbnail cache is
-  bounded by bytes as well as entries, since zoomed-in grids request larger
-  renditions.
+  8 MB original. Images use private browser caching; generation changes refresh
+  image URLs. The thumbnail LRU is bounded by bytes and entries, and replaced
+  originals invalidate its entries.
 - **Downloads stream.** Bulk downloads are zipped (STORED, not deflated — JPEGs
   don't compress) and streamed, so a multi-GB archive costs almost no memory.
 
-For heavier load, put it behind gunicorn and a reverse proxy — the app factory is
-`image_filterer.server:create_app`. **Authentication is a single shared
+For heavier load, use a reverse proxy with one threaded gunicorn worker — the app
+factory is `image_filterer.server:create_app`. Run caches, star locks, the watcher,
+and the GPU lock are process-local, so multiple worker processes are unsupported. **Authentication is a single shared
 password**, off by default — see [Authentication](#authentication). It isn't a
 substitute for a real access-controlled network; add auth at the proxy too if
 you expose this beyond a trusted LAN.
@@ -492,9 +690,11 @@ checkpoint keeps scoring correctly even after config changes.
 | **Subject** | people / stage | Largest YOLO person box vs. frame area. |
 | **★ Hero** | on / off | One dominant person, no second prominent person, clean dark background. |
 | **Quality** | top N% | Percentile of `score_s12_after_hard` over the run. A percentile rather than a raw score because the ranker's units are arbitrary and differ per run. Applies to bursts, frames within a burst and search hits — but **not** to `/api/starred`, where a human pick outranks the model's opinion. |
-| **Sort** | rank / time | Rank uses the burst representative's score; time uses EXIF `DateTimeOriginal` (falling back to mtime), cached per run. |
+| **Sort** | rank / time / stars | Rank uses the burst representative's score. Time and stars both change *which frame is shown* on the tile, not just burst order: time shows each burst's earliest frame; stars shows its most-starred frame (not a sum — one frame with 3 stars outranks a burst where five frames each got 1). A burst with no stars keeps its normal representative under the stars sort. Whatever's shown, opening the burst still lets you browse and star every frame in it. |
 
-All of them AND together, and all combine with search.
+All of them AND together, and all combine with search. Filtering happens before
+choosing a burst’s displayed frame, so changing sort order cannot show a photo
+that fails the active filters.
 
 ## Run outputs
 
@@ -507,12 +707,17 @@ Each ingested folder becomes a run under `$IMAGE_FILTERER_DATA_ROOT/runs/run0001
 | `search_index.npy` | full-frame embeddings, row-aligned to `ranked.csv` |
 | `stars.json` | starred frame paths (created on first star) |
 | `captured_at.json` | EXIF timestamp cache, backfilled for runs predating the `captured_at` column |
-| `version.json` | generation counter; odd = a write is in flight, even = committed |
+| `version.json` | committed generation counter, advanced by two for each successful publication |
+| `current/` | symlink to the complete published generation under `.generations/` |
+| `validated.json` | size/mtime signatures of successfully decoded images |
 | `config.json` | the exact config used |
 | `uploads/` | the images, for browser uploads only (absent for "folder on server" runs) |
 
 `ranked.csv` is the export path — hand it to anyone who wants the ordering
-without the UI.
+without the UI. Top-level CSV, search-index, config and version paths are aliases
+into `current/`; old runs with regular files still load normally. The current and
+previous generations are retained. Copy the resolved files when exporting run
+metadata to another machine.
 
 ## HTTP API
 
@@ -524,23 +729,31 @@ without the UI.
 | `GET /api/ingest/status?run_id=` | progress for one ingest |
 | `GET /api/active` · `POST /api/cancel_ingest` | the running ingest; cooperative cancel |
 | `POST /api/select_run` | `{run_id}` — load a ready run |
-| `GET /api/bursts?shot=&subject=&hero=&sort=&offset=&limit=` | ranked bursts |
+| `GET /api/bursts?shot=&subject=&hero=&sort=&unfurl=&offset=&limit=` | ranked bursts (or, with `unfurl=1`, ranked individual frames) |
 | `GET /api/burst/<id>` | frames within a burst |
-| `GET /api/search?q=&shot=&subject=&hero=&starred=` | semantic search |
+| `GET /api/search?q=&shot=&subject=&hero=&starred=&unfurl=` | semantic search |
 | `GET /api/stars?viewer=` · `POST /api/star` · `POST /api/stars/clear` | read / toggle / clear stars (per-viewer) |
 | `GET /api/run/preview_delete?run_id=` · `POST /api/delete_run` | what a delete destroys, then do it |
 | `GET /api/starred?shot=&subject=&hero=&sort=` | starred frames, one entry per frame |
-| `GET /download?path=` | one original, as an attachment |
+| `GET /download?run_id=&path=` | one original, as an attachment |
 | `POST /api/download/prepare` | `{scope:"starred"}` or `{paths:[…]}` → `{token, count, bytes}` |
 | `GET /api/download/zip?token=` | streams the prepared archive |
 | `GET /api/version?run_id=` | cheap poll: generation + counts, drives the reload prompt |
 | `GET /api/hotfolder` · `POST /api/hotfolder/start` · `/stop` | watch a folder |
-| `GET /img` · `GET /thumb?w=` | image bytes (path-allowlisted to the run's tree) |
+| `GET /img` · `GET /thumb?w=` | image bytes (only exact files indexed in the requested run) |
 
 `shot` is comma-separated multi-select (`wide,medium,close`); `subject` is a
 single value (`people`\|`stage`); `hero=1` restricts to hero shots; `sort=time`
-orders chronologically instead of by rank; `top_pct=N` keeps only the strongest
-N% of frames (clamped to 1–100).
+orders chronologically and `sort=stars` by each burst's most-starred frame,
+instead of by rank; `top_pct=N` keeps only the strongest
+N% of frames (clamped to 1–100); `unfurl=1` turns off burst grouping on both
+`/api/bursts` and `/api/search` — each returns one row per individual frame
+instead of one per burst, with every other filter/sort applied at the frame
+level directly (a burst's frames all share the same quality percentile pool,
+so this changes *what's grouped*, not the underlying scores). It also changes
+what `starred=1` means for search: normally "this burst holds a star
+somewhere" (since search collapses to one hit per burst, which may not be the
+starred frame); unfurled, "this exact frame is starred."
 
 ## Robustness
 
@@ -551,8 +764,9 @@ N% of frames (clamped to 1–100).
   a stray `\r\n` to uploaded bodies (a leaked multipart separator) and break
   decoding. The server strips junk before the real image header, restoring the
   bytes *and* the sha1 — so the feature cache still hits.
-- **Downloads are path-allowlisted** to the loaded run's tree, the same boundary
-  as image serving.
+- **Downloads and image serving allow only indexed files** in the requested run,
+  not neighboring files. Deleted runs and their prepared download tokens are
+  no longer available.
 - **RAW is read via its embedded preview**, not by demosaicing: ~10 ms per file
   instead of 1-3 s, and on current bodies the preview is full resolution (an R5
   Mark II CR3 yields 8192×5464). Needs `rawpy`; without it RAW is reported
@@ -595,8 +809,8 @@ docs/             architecture and tuning notes
   0.96 AUC as "on material resembling that one shoot."
 - **Scene thresholds were set by eye** on that same dataset. The raw detector
   outputs are cached, so re-tuning costs nothing but a re-ingest.
-- **Cross-camera moments split.** Two photographers shooting the same gesture
-  from different angles produce two bursts.
+- **Camera identity uses EXIF.** Bodies with distinct serial numbers stay separate;
+  identical body/lens combinations without serial numbers can still merge.
 - **Star ownership is per-browser, not per-account.** "You" is a random id in
   `localStorage`, optionally labeled with a display name; clearing site data
   makes your stars look like someone else's. Stars from before ownership

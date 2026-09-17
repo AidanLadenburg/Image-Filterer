@@ -57,8 +57,6 @@ class FeatureConfig:
     face_encoder: str = "farl_base"
     use_valence_arousal: bool = False
     face_expand: float = 1.55
-    face_min_frac: float = 0.015
-    body_pad_frac: float = 0.10
     batch_size: int = 8
     cradio_input_side: Optional[int] = 1024
     skip_face_detect: bool = False
@@ -178,7 +176,6 @@ class BurstConfig:
     # Deliberately extreme so genuine burst-mates are never merged.
     pixel_identical_cosine: float = 0.9995
 
-    suspect_size: int = 30
     representative_score_col: str = "score_s12_after_hard"
 
 

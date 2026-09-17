@@ -1,0 +1,26 @@
+# NVIDIA's Spark playbook uses this ARM64 / Blackwell-capable framework image.
+# Override with a tested tag or digest, never an unqualified "latest".
+ARG SPARK_BASE_IMAGE=nvcr.io/nvidia/pytorch:25.11-py3
+FROM ${SPARK_BASE_IMAGE}
+USER root
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates openssl libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+# Preserve the matched NVIDIA framework builds while resolving app dependencies.
+# Fail on conflicting requirements instead of replacing the GPU stack.
+RUN python -c 'from importlib.metadata import version; from pathlib import Path; Path("/opt/framework-constraints.txt").write_text("".join(f"{p}=={version(p)}\n" for p in ("torch", "torchvision")))'
+COPY pyproject.toml README.md ./
+COPY image_filterer ./image_filterer
+COPY scripts ./scripts
+COPY deploy/spark ./deploy/spark
+RUN PIP_CONSTRAINT=/opt/framework-constraints.txt python -m pip install --no-cache-dir . \
+    && python -m pip freeze > /opt/image-filterer-environment.txt
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
+    HOME=/data/home HF_HOME=/data/huggingface \
+    IMAGE_FILTERER_DATA_ROOT=/data/app \
+    IMAGE_FILTERER_ASSET_DIR=/data/assets \
+    YOLO_CONFIG_DIR=/data/ultralytics
+EXPOSE 8600
+ENTRYPOINT ["python", "/app/deploy/spark/entrypoint.py"]
+CMD ["serve"]

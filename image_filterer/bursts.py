@@ -105,19 +105,16 @@ def read_frame_meta(path: Path) -> Optional[FrameMeta]:
         if is_raw(path):
             named = _raw_exif(path)
         else:
-            im = Image.open(path)
-            exif = im._getexif() or {}
+            with Image.open(path) as im:
+                exif = im._getexif() or {}
             named = {ExifTags.TAGS.get(k, str(k)): v for k, v in exif.items()}
         dt_str = named.get("DateTimeOriginal")
         if not dt_str:
             return None
         dt = datetime.strptime(str(dt_str), "%Y:%m:%d %H:%M:%S")
         subsec_raw = str(named.get("SubsecTimeOriginal", "0")).strip()
-        subsec = int(subsec_raw) if subsec_raw.isdigit() else 0
-        if subsec >= 100:
-            dt += timedelta(microseconds=subsec * 1000)
-        else:
-            dt += timedelta(microseconds=subsec * 10000)
+        if subsec_raw.isdigit():
+            dt += timedelta(microseconds=int(subsec_raw[:6].ljust(6, "0")))
         return FrameMeta(path=path, camera_id=_camera_id_from_exif(named, path), captured_at=dt)
     except Exception:
         return None

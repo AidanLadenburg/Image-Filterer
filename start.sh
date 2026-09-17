@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Double-click launcher: asks for tonight's password, then starts the server.
 # The password is never saved to disk — you set it fresh each time you run
-# this, and it's only good until the server is stopped (or 18h, whichever
-# comes first per viewer session).
+# this. Sessions last at most 18h and survive restarts with the same password;
+# choosing a different password invalidates previously signed-in sessions.
 set -uo pipefail
 shopt -s nullglob
 
@@ -71,5 +71,10 @@ echo
 echo "Starting the server — leave this window open while people are using it."
 echo "Close it (or Ctrl+C) to stop the server."
 echo
+echo "Serving over self-signed HTTPS so Export (Chrome/Edge) works for everyone,"
+echo "not just people on this machine. Each browser will show a 'not private'"
+echo "warning the first time — that's expected for a self-signed certificate;"
+echo "click through it ('Advanced' -> 'Proceed')."
+echo
 
-"$BIN" --host 0.0.0.0 --port 8600 --open-firewall
+"$BIN" --host 0.0.0.0 --port 8600 --open-firewall --https
