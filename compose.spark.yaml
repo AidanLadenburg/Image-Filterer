@@ -16,6 +16,10 @@ services:
       IMAGE_FILTERER_PASSWORD: ${IMAGE_FILTERER_PASSWORD:-}
       # Server-side export is enabled only when EXPORT_PATH is set.
       IMAGE_FILTERER_EXPORT_DIR: ${EXPORT_PATH:+/exports}
+      # Optional: Slack/Teams incoming webhook for problem alerts.
+      IMAGE_FILTERER_ALERT_WEBHOOK: ${IMAGE_FILTERER_ALERT_WEBHOOK:-}
+      IMAGE_FILTERER_OCR_WORKERS: ${IMAGE_FILTERER_OCR_WORKERS:-4}
+      IMAGE_FILTERER_MEM_CACHE_MB: ${IMAGE_FILTERER_MEM_CACHE_MB:-1024}
     volumes:
       - type: bind
         source: ${SPARK_DATA_DIR:?Set SPARK_DATA_DIR in .env.spark}
@@ -45,7 +49,7 @@ services:
     shm_size: 1gb
     stop_grace_period: 30s
     healthcheck:
-      test: ["CMD", "python", "-c", "import ssl, urllib.request; urllib.request.urlopen('https://127.0.0.1:8600/login', context=ssl._create_unverified_context(), timeout=5).close()"]
+      test: ["CMD", "python", "-c", "import ssl, urllib.request; urllib.request.urlopen('https://127.0.0.1:8600/', context=ssl._create_unverified_context(), timeout=5).close()"]
       interval: 30s
       timeout: 10s
       start_period: 60s

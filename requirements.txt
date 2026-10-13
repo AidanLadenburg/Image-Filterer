@@ -10,11 +10,12 @@ pandas>=2.0
 pillow>=10.0
 flask>=3.0
 opencv-python>=4.9
-open_clip_torch>=2.24
+open_clip_torch>=3.3
 transformers>=4.40
 mediapipe>=0.10
-ultralytics>=8.2
+ultralytics>=8.4.155
 tqdm>=4.65
+psutil>=5.9
 rawpy>=0.18
 
 # pyexiv2 is REQUIRED, not optional: RAW files carry DateTimeOriginal only in the
@@ -23,8 +24,9 @@ rawpy>=0.18
 # lens model that PIL won't surface.
 pyexiv2>=2.8
 
-# Text on screen (OCR) — the [ocr] extra in pyproject.toml. CUDA 13 GPU only;
-# leave these out elsewhere and the app simply reports OCR as unavailable.
+# Text on screen (OCR) — the [ocr] extra in pyproject.toml. TensorRT needs a
+# CUDA 13 GPU (else RapidOCR's torch engine is used); leave these out and the
+# app simply reports OCR as unavailable.
 rapidocr>=3.9,<3.10
 onnxruntime>=1.18
 tensorrt-cu13>=10

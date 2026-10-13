@@ -41,7 +41,9 @@
 
 ## Getting started
 
-1. **Open the link** your admin shares — something like `http://<server>:8600/`.
+1. **Open the link** your admin shares — something like `https://<server>:8600/`.
+   The first time, the browser warns the connection isn't private; that's
+   expected — click **Advanced → Proceed**.
 2. **Pick a shoot** from the dropdown at the top left.
 3. **Browse.** The best-guess keepers come first.
 
@@ -288,9 +290,11 @@ Yes, always — the original file, untouched. What you see in the grid and previ
 are smaller copies made for speed.
 
 **Search isn't finding something I know is there.**
-It matches on what a photo *looks like*, not on names or text. It has no idea who
-anyone is. Describe the scene ("two people shaking hands on stage") rather than
-naming a person or a company.
+Search matches what a photo *looks like*, plus any words visible in it (slides,
+screens, signs). It has no idea who anyone is, so a person's name only finds
+photos where the name is on screen. Describe the scene ("two people shaking
+hands on stage") rather than naming someone. Text is read a few seconds after
+photos arrive, so a brand-new photo may not match by its text yet.
 
 **A great photo is tagged "stage" instead of "people", or isn't a hero.**
 Those cut-offs are simple thresholds on the speaker's size and the brightness
@@ -307,17 +311,26 @@ browser page, you can stop here.**
 
 ## Requirements
 
-- **Python 3.10+**
-- **An NVIDIA GPU** (~8 GB VRAM). CPU works and is correct, but feature
-  extraction is roughly 20× slower — a 3,000-image shoot goes from minutes to
-  hours. Developed on an RTX A6000.
-- **~5 GB disk** for model weights and the feature cache; the cache grows about
-  **25 MB per 1,000 images**.
+- **Linux with an NVIDIA GPU** and a driver that supports **CUDA 13** (tested
+  with driver 580). Developed and tested on an NVIDIA GB10 (DGX Spark, ARM64,
+  128 GB unified memory). On a discrete card, plan on roughly **16 GB+ of VRAM**:
+  SigLIP2, FaRL and YOLO11x-pose stay loaded, and each text-reading worker holds
+  another ~0.9 GB (four by default — lower `IMAGE_FILTERER_OCR_WORKERS` on a
+  smaller card). Without a GPU the app still runs, but far slower, and text on
+  screen is off.
+- **Python 3.10+** (tested with 3.12).
+- **Internet on first setup and first start**, to download model weights.
+- **~15 GB free disk to start**: ~5.3 GB of model weights, several GB of Python
+  packages (the PyTorch and TensorRT wheels are large), and the feature cache,
+  which grows about **25 MB per 1,000 photos**. A watched network folder is also
+  copied to local disk (see [hot folder](#watching-a-folder-hot-folder)), so
+  add the size of the photos for those shoots.
 
-**Text on screen** (OCR) is an optional extra, `pip install -e ".[ocr]"`: PP-OCRv4
-on TensorRT, so it needs a CUDA 13 GPU. The first start builds TensorRT
-engines for the machine (~40 s, then cached in `$IMAGE_FILTERER_DATA_ROOT/models/ocr`).
-Without it the app runs normally and text search simply finds nothing on screen.
+**Text on screen** (OCR) is the `ocr` extra, included in the setup below:
+PP-OCR (v3 detector, v4 recognizer) through RapidOCR, run with TensorRT when
+it's installed, otherwise with RapidOCR's PyTorch engine. It stays off only
+without `rapidocr` or a CUDA GPU (or with `IMAGE_FILTERER_OCR_WORKERS=0`);
+the app then runs normally and text search simply finds nothing on screen.
 
 Two dependencies are worth knowing about, both installed by `pip install -e .`:
 `rawpy` reads RAW files via their embedded preview, and `pyexiv2` supplies the
@@ -332,22 +345,26 @@ cd Image-Filterer
 
 python -m venv .venv && source .venv/bin/activate
 
-# 1) Install the current stable PyTorch and TorchVision pair. Verify the command
-#    for your platform at https://pytorch.org/get-started/locally/.
-#    Current Linux ARM64 wheels include CUDA 13 support for DGX Spark.
+# 1) PyTorch + TorchVision with CUDA 13. On Linux ARM64 (DGX Spark) the plain
+#    command installs CUDA-enabled wheels. On x86_64, take the CUDA 13 command
+#    from https://pytorch.org/get-started/locally/, e.g.
+#    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
 pip install torch torchvision
 
 # 2) Install the package and its remaining dependencies (+ text on screen).
 pip install -e ".[ocr]"
 
-# 3) Keep runtime state/model caches local to this checkout, then fetch weights.
+# 3) Keep runtime state and model caches in ./data, then fetch weights.
+#    (start.sh sets the same three variables.)
 export IMAGE_FILTERER_DATA_ROOT="$PWD/data"
 export HF_HOME="$IMAGE_FILTERER_DATA_ROOT/huggingface"
 export YOLO_CONFIG_DIR="$IMAGE_FILTERER_DATA_ROOT/ultralytics"
 python -m scripts.fetch_assets
 ```
 
-`fetch_assets` downloads four files into `~/.local/share/image-filterer/assets`:
+The installs take a few minutes. `fetch_assets` downloads four files (~770 MB)
+into `$IMAGE_FILTERER_DATA_ROOT/assets` — `./data/assets` with the exports
+above:
 
 | File | Size | Used for |
 |---|---|---|
@@ -356,9 +373,17 @@ python -m scripts.fetch_assets
 | `face_landmarker.task` | 3.7 MB | eyelid / mouth landmarks |
 | `yolo11x-pose.pt` | 113 MB | people + body keypoints (speaker, shot type, hero, expression crop) |
 
-The two encoder backbones (SigLIP2-SO400M, and the ViT-B/16 skeleton FaRL loads
-into) are pulled from HuggingFace by `open_clip` on first use — no action needed,
-but the first run will pause to download ~1.5 GB.
+The **first start** downloads the rest, so it needs internet too:
+
+- **SigLIP2** (`timm/ViT-SO400M-14-SigLIP2`, ~4.5 GB) into `$HF_HOME`, pulled
+  by `open_clip`. (FaRL's ViT-B/16 skeleton is built empty and downloads
+  nothing.)
+- **The OCR models** (~24 MB with their TensorRT engines) into
+  `$IMAGE_FILTERER_DATA_ROOT/models/ocr`. Building the TensorRT engines takes
+  ~40 s, once per machine.
+
+Everything is cached afterwards. On a GB10 with all of that downloading, the
+first 40 photos of a watched folder were visible after about a minute.
 
 **Migrating from an older checkout?** Reuse the weights and the feature cache you
 already have — nothing needs recomputing, since cache keys are content hashes:
@@ -375,11 +400,13 @@ pip install -e ".[dev]" && pytest        # smoke + regression tests, no inferenc
 node --test tests/test_ui.cjs             # browser logic; Node 18+, no npm install
 ```
 
+Then [run it](#running) with `./start.sh`.
+
 ## NVIDIA DGX Spark: Docker installation
 
-Use this installation path on DGX Spark instead of the CUDA 12.1 / native venv
-example above. `start.sh` remains the native launcher; **`start-spark.sh` is the
-Docker launcher**. Run the commands below from the repository root.
+An alternative to the native setup above. `start.sh` remains the native
+launcher; **`start-spark.sh` is the Docker launcher**. Run the commands below
+from the repository root.
 
 The application has the same features in a native deployment. Native mode sees
 host paths directly, so the watcher UI can use a local, LucidLink, or NAS path
@@ -533,10 +560,11 @@ bash start-spark.sh up                    # start again
 bash start-spark.sh up --force-recreate   # apply environment or mount changes
 ```
 
-The health check tests HTTPS responsiveness, not GPU throughput or mount health.
+The health check tests HTTPS responsiveness, not GPU throughput or mount health
+(those show in the app's own problem banner — see [Robustness](#robustness)).
 Startup checks GPU kernels and required asset files, but does not repeat the full
-model check. Restarting the container **does not restore an active hot-folder
-watch**; starting another watch currently creates a new shoot. The restart policy
+model check. An active hot-folder watch **resumes into the same shoot** after a
+container restart, as long as `SPARK_DATA_DIR` is kept. The restart policy
 restarts an exited container, not an unhealthy-but-running one.
 
 To preserve installation details after a successful rehearsal:
@@ -558,22 +586,30 @@ checkout, a container, or an install. All are optional.
 
 | Variable | Default | What it controls |
 |---|---|---|
-| `IMAGE_FILTERER_DATA_ROOT` | `~/.local/share/image-filterer` | Run storage + the SQLite registry |
+| `IMAGE_FILTERER_DATA_ROOT` | `./data` with `start.sh`; otherwise `~/.local/share/image-filterer` | Run storage, the SQLite registry, settings, and (by default) the cache and weights |
 | `IMAGE_FILTERER_CACHE_DIR` | `$IMAGE_FILTERER_DATA_ROOT/cache` | Feature cache (share it across machines) |
-| `IMAGE_FILTERER_ASSET_DIR` | `$IMAGE_FILTERER_DATA_ROOT/assets` | Third-party weights |
+| `IMAGE_FILTERER_ASSET_DIR` | `$IMAGE_FILTERER_DATA_ROOT/assets` | Third-party weights from `fetch_assets` |
+| `HF_HOME` | `$IMAGE_FILTERER_DATA_ROOT/huggingface` with `start.sh` | Hugging Face cache — where SigLIP2 is downloaded |
+| `YOLO_CONFIG_DIR` | `$IMAGE_FILTERER_DATA_ROOT/ultralytics` with `start.sh` | Ultralytics settings folder |
 | `IMAGE_FILTERER_MODEL_PATH` | `image_filterer/model/ranker.pt` | The production ranker |
 | `IMAGE_FILTERER_TRAIN_ROOT` | `./dataset` | Labeled data, training only |
-| `IMAGE_FILTERER_PASSWORD` | unset (no auth) | Shared password gating the whole server — see [Authentication](#authentication) |
-| `IMAGE_FILTERER_EXPORT_DIR` | unset | Default host export folder (can be changed in Settings), e.g. `exports/` on a LucidLink share |
-| `IMAGE_FILTERER_OCR_WORKERS` | `4` | GPU processes reading text on screen; `0` turns it off. On a GB10: 3 → ~26 s, 4 → ~21 s, 5 → ~19 s per 700 photos |
+| `IMAGE_FILTERER_PASSWORD` | unset (no auth) | Shared password gating the whole server — see [Authentication](#authentication). `start.sh` asks for it, unless it's already set (for a scripted start) |
+| `IMAGE_FILTERER_EXPORT_DIR` | unset | Default host export folder; a folder chosen in Settings takes precedence. E.g. `exports/` on a LucidLink share |
+| `IMAGE_FILTERER_OCR_WORKERS` | `4` | GPU processes reading text on screen (~0.9 GB of GPU memory each); `0` turns it off. On a GB10: 3 → ~26 s, 4 → ~21 s, 5 → ~19 s per 700 photos |
+| `IMAGE_FILTERER_CPU_WORKERS` | CPU cores − 2, between 1 and 12 | Threads for decoding and face detection during ingest |
 | `IMAGE_FILTERER_MEM_CACHE_MB` | `1024` | In-memory copy of the feature/scene/text cache (~10 MB per 1,000 photos). Live runs re-load every photo on each ingest: at 10k photos this is ~2.5 s instead of ~10 s. Past the cap, older entries are read from disk again |
-| `IMAGE_FILTERER_ALERT_WEBHOOK` | unset | Slack/Teams incoming-webhook URL. Problems that last 30 s (Lucid unmounted, export folder missing, a crashed watch, auto-export or text-reading errors, low memory/disk) are posted when they start and again when resolved; they always show as a red banner for every viewer and as a desktop notification on the server |
+| `IMAGE_FILTERER_ALERT_WEBHOOK` | unset | Slack/Teams incoming-webhook URL — see [Robustness](#robustness). Problems are always shown as a red banner for every viewer and as a desktop notification on the server |
 | `IMAGE_FILTERER_PORT` | `8600` | Port used by `start.sh` |
-| `IMAGE_FILTERER_HOST_ROOTS` | home, `/mnt`, `/media`, `/photos`, `/exports` | `:`-separated host locations that **Browse host…** and the host export folder are limited to |
+| `IMAGE_FILTERER_HOST_ROOTS` | `host_roots` in `$IMAGE_FILTERER_DATA_ROOT/host_settings.json` if present, else home, `/mnt`, `/media`, `/photos`, `/exports` | `:`-separated host locations that **Browse host…** and the host export folder are limited to. The variable wins over the file |
+| `FARL_LOCAL_CKPT` · `YUNET_MODEL` | unset | Point at a FaRL checkpoint / YuNet `.onnx` outside the asset folder |
 
-Run storage deliberately defaults **outside the repo** so that git operations,
-cleanups, or a `rm -rf` in the working tree can never destroy live runs. In
-particular, `git clean -xdf` would delete an in-tree data root.
+**Keep the data root on local disk and out of `git clean`.** With `start.sh`
+(and the Setup above) everything lives in `./data`, which Git ignores — so
+`git clean -xdf` **deletes all runs, stars, settings and downloaded models**.
+Point `IMAGE_FILTERER_DATA_ROOT` outside the checkout if you clean it that
+way. Running `image-filterer-server` without these variables silently uses
+`~/.local/share/image-filterer` instead: a different set of runs, and no
+weights until `fetch_assets` is run again for it.
 
 Model behavior lives in `image_filterer/config.py` — every tunable is a
 dataclass field with a comment explaining which experiment settled its value. See
@@ -581,20 +617,40 @@ dataclass field with a comment explaining which experiment settled its value. Se
 
 ## Running
 
-The repo ships a trained model, so serving works immediately after setup:
+The repo ships a trained model, so serving works immediately after setup.
+**Run it with the launcher** (double-click it, or from the checkout):
 
 ```bash
-image-filterer-server --host 0.0.0.0 --port 8600
-# or: python -m image_filterer.server --host 0.0.0.0 --port 8600
+./start.sh
 ```
 
-The startup banner prints the URL to share with the team:
+It finds the installed server (`./.venv`, `PATH`, or a conda environment),
+sets `IMAGE_FILTERER_DATA_ROOT=./data`, `HF_HOME` and `YOLO_CONFIG_DIR` as in
+Setup, asks for the night's password (never saved to disk), and serves over
+HTTPS on port 8600 (`IMAGE_FILTERER_PORT`), trying to open the firewall port.
+It also restarts the server if it crashes or stops answering — see
+[Robustness](#robustness). Leave its window open; Ctrl+C stops the server.
+
+To run the server directly instead, export the same three variables first, or
+it will use a different data folder and miss the downloaded weights:
+
+```bash
+export IMAGE_FILTERER_DATA_ROOT="$PWD/data"
+export HF_HOME="$IMAGE_FILTERER_DATA_ROOT/huggingface"
+export YOLO_CONFIG_DIR="$IMAGE_FILTERER_DATA_ROOT/ultralytics"
+image-filterer-server --host 0.0.0.0 --port 8600 --https
+# or: python -m image_filterer.server --host 0.0.0.0 --port 8600 --https
+```
+
+The startup banner prints the URL to share with the team (shortened):
 
 ```
 Image Filterer (model=ranker.pt)
-  data:   /home/you/.local/share/image-filterer   (set IMAGE_FILTERER_DATA_ROOT to change)
-  local:  http://127.0.0.1:8600/
-  remote: http://<this-host-ip>:8600/
+  auth:   password required (set IMAGE_FILTERER_PASSWORD to change)
+  data:   /path/to/Image-Filterer/data   (set IMAGE_FILTERER_DATA_ROOT to change)
+  text:   reading text on screen with 4 GPU workers (tensorrt)
+  local:  https://127.0.0.1:8600/
+  remote: https://<this-host-ip>:8600/
 ```
 
 Share the `remote:` URL. If a colleague can't connect, it is almost always the
@@ -616,15 +672,16 @@ ssh -L 8600:localhost:8600 you@<host>     # then open http://localhost:8600
 
 ### Authentication
 
-There's no authentication by default — anyone with the link can browse and
-star. To require a password:
+`start.sh` always sets a password. Run directly, the server has no
+authentication unless `IMAGE_FILTERER_PASSWORD` is set — anyone with the link
+can browse and star:
 
 ```bash
 export IMAGE_FILTERER_PASSWORD=whatever-you-want
-image-filterer-server --host 0.0.0.0 --port 8600
+image-filterer-server --host 0.0.0.0 --port 8600 --https
 ```
 
-Every route is gated except the login page itself; unauthenticated requests to
+Every route is gated except the login page itself (`POST /login`); unauthenticated requests to
 `/` get a login form and everything else gets a `401`. A session lasts 18
 hours from login and survives server restarts with the same password — the signing
 key is written once to `$IMAGE_FILTERER_DATA_ROOT/.session_secret`. Changing the
@@ -686,12 +743,30 @@ through the local kernel, so a photographer writing from another machine to a
 network or cloud mount generates nothing to listen for. Polling also survives
 inotify queue overflow, which would otherwise drop a photo permanently.
 
-A 5 s scan tracks which files have stopped growing (size + mtime unchanged for
-two ticks, then a decode check); ingestion runs only when something is ready, the
-ingest lock is free, and a cooldown has passed — so 300 files landing at once
-become one pass. The scan eases to 30 s after ten quiet minutes and snaps back on
-first sight of a new file. One watcher at a time; it stops itself after ~6 hours
-idle so a forgotten watch can't poll a cloud mount forever.
+Each scan lists the folder and decode-checks new photos **on first sight** —
+the decode is what proves a file complete (on a cloud mount a file shows its
+final size while still uploading). A file seen growing waits for one unchanged
+scan, and RAW files always wait one scan. Ingestion runs only when something is
+ready, the ingest lock is free, and a cooldown has passed — so 300 files landing
+at once become one pass. Local folders scan every 5 s with a 20 s cooldown;
+network folders every 2 s with a 5 s cooldown. The scan eases to 30 s after ten
+quiet minutes and snaps back on first sight of a new file. One watcher at a
+time; it stops itself after ~6 hours idle so a forgotten watch can't poll a
+cloud mount forever.
+
+**Network folders are mirrored.** On a network or cloud mount (SMB, NFS, FUSE
+mounts such as LucidLink) every read is a round trip, and ingest touches each
+photo several times. So each photo is copied **once** into the run's `mirror/`
+folder on local disk — the decode check reads that copy — and ingest,
+thumbnails, downloads and exports all use it. Local folders are never
+mirrored. Budget local disk for the photos of a watched network shoot.
+
+**A watch survives restarts.** The active watch is recorded in
+`$IMAGE_FILTERER_DATA_ROOT/active_watch.json`; on start the server resumes it
+into the same run, with the photos already in it known, so nothing is
+re-added. Stop watching, a new watch, or the idle stop ends it for good. If the
+folder becomes unreadable (Lucid unmounted), every viewer sees a red banner
+until it's back — see [Robustness](#robustness).
 
 Unreadable files are remembered until their size or modification time changes,
 so a repaired copy gets another chance. Failed batches remain queued and retry
@@ -786,8 +861,9 @@ never trained on, never splitting a burst:
 
 Each reports moment-level average precision (`ap`), the share of keepers in the
 top 10% of moments, and how often the best frame of a mixed burst is a keeper.
-The shipped model scores ap ≈ 0.69 / 0.68 and picks the best frame 77% / 83% of
-the time. A new model should beat those before it ships.
+The shipped model (photographer out / timeline) scores ap ≈ 0.76 / 0.67, puts
+90% / 83% of keepers in the top 10% of moments, and picks the best frame
+75% / 80% of the time. A new model should beat those before it ships.
 
 The shipped weights come from a final fit on all usable labeled data. Frames are
 content-deduped by sha1, and a positive label wins any collision.
@@ -798,8 +874,9 @@ Restart the server. Existing runs keep their old scores; re-ingest a folder to
 score it with the new model. Keep the previous checkpoint around — swapping back
 is just `IMAGE_FILTERER_MODEL_PATH=/path/to/old.pt`.
 
-Older (v1) checkpoints still load and score; the checkpoint records which
-encoders it was trained on, and ingest refuses to run with different ones.
+Older (v1) checkpoints still load and score — the previous shipped model is kept
+as `image_filterer/model/ranker_v1.pt`. The checkpoint records which encoders it
+was trained on, and ingest refuses to run with different ones.
 
 ## How the filters are derived
 
@@ -831,13 +908,31 @@ Each ingested folder becomes a run under `$IMAGE_FILTERER_DATA_ROOT/runs/run0001
 | `current/` | symlink to the complete published generation under `.generations/` |
 | `validated.json` | size/mtime signatures of successfully decoded images |
 | `config.json` | the exact config used |
-| `uploads/` | the images, for browser uploads only (absent for "folder on server" runs) |
+| `search_index.json` | which encoder and dimensions `search_index.npy` was built with |
+| `uploads/` | the images, for browser uploads only (absent for host-folder runs) |
+| `mirror/` | local copies of photos from a network host folder (see [hot folder](#watching-a-folder-hot-folder)) |
+| `auto_export.json` · `auto_export_state.json` | this shoot's auto-export settings, and what has already been sent (so a restart never re-exports) |
 
 `ranked.csv` is the export path — hand it to anyone who wants the ordering
 without the UI. Top-level CSV, search-index, config and version paths are aliases
 into `current/`; old runs with regular files still load normally. The current and
 previous generations are retained. Copy the resolved files when exporting run
 metadata to another machine.
+
+Next to `runs/`, the data root holds:
+
+| Path | Contents |
+|---|---|
+| `registry.db` | the SQLite run registry |
+| `cache/` · `assets/` | feature/scene/text cache and `fetch_assets` weights (unless moved by their variables) |
+| `huggingface/` · `ultralytics/` | `HF_HOME` (SigLIP2) and `YOLO_CONFIG_DIR`, when set by `start.sh` |
+| `models/ocr/` | OCR models and the TensorRT engines built for this machine |
+| `host_settings.json` | the host export folder chosen in Settings, and optional `host_roots` |
+| `auto_export_defaults.json` | the last saved auto-export setup, applied to the next host-folder run |
+| `active_watch.json` | the running folder watch, resumed after a restart |
+| `viewer_names.json` | display names by browser id |
+| `.session_secret` · `ssl/` | login-session signing key; self-signed HTTPS certificate |
+| `launcher.log` | `start.sh` restarts and alerts |
 
 ## HTTP API
 
@@ -851,7 +946,7 @@ metadata to another machine.
 | `POST /api/select_run` | `{run_id}` — load a ready run |
 | `GET /api/bursts?shot=&subject=&hero=&sort=&unfurl=&offset=&limit=` | ranked bursts (or, with `unfurl=1`, ranked individual frames) |
 | `GET /api/burst/<id>` | frames within a burst |
-| `GET /api/search?q=&shot=&subject=&hero=&starred=&unfurl=` | semantic search |
+| `GET /api/search?q=&shot=&subject=&hero=&starred=&unfurl=` | search by description and by text on screen |
 | `GET /api/stars?viewer=` · `POST /api/star` · `POST /api/stars/clear` | read / toggle / clear stars (per-viewer) |
 | `GET /api/run/preview_delete?run_id=` · `POST /api/delete_run` | what a delete destroys, then do it |
 | `GET /api/starred?shot=&subject=&hero=&sort=` | starred frames, one entry per frame |
@@ -860,6 +955,16 @@ metadata to another machine.
 | `GET /api/download/zip?token=` | streams the prepared archive |
 | `GET /api/version?run_id=` | cheap poll: generation + counts, drives the reload prompt |
 | `GET /api/hotfolder` · `POST /api/hotfolder/start` · `/stop` | watch a folder |
+| `POST /api/ingest/host` | `{path, name?}` — one-shot run from a host folder (no upload, no watch) |
+| `GET /api/host/browse?path=` | subfolders of an allowed host folder, with photo counts |
+| `POST /api/host/mkdir` | `{parent, name}` — create one folder inside an allowed host folder |
+| `GET /api/host/settings` · `POST /api/host/export_dir` | the host export folder and allowed roots; set or clear the export folder (must exist and be writable) |
+| `POST /api/export/server` · `GET /api/export/server/<job_id>` | copy originals to the host export folder in the background; job progress |
+| `GET /api/auto_export` · `POST /api/auto_export` | this shoot's auto-export settings and status; save them |
+| `POST /api/auto_export/preview` | what each auto-export folder would hold now, without copying |
+| `GET /api/ocr/lines?path=&q=` | text read on one photo, with boxes and which lines match `q` |
+| `GET /api/health` | current problems (the red banner) |
+| `POST /login` · `POST /api/name` | sign in with the shared password; set a display name |
 | `GET /img` · `GET /thumb?w=` | image bytes (only exact files indexed in the requested run) |
 
 `shot` is comma-separated multi-select (`wide,medium,close`); `subject` is a
@@ -878,16 +983,22 @@ starred frame); unfurled, "this exact frame is starred."
 ## Robustness
 
 - **The server restarts itself.** `start.sh` supervises it: if it exits
-  without Ctrl+C, it's back within ~6 s; if it stops answering, it's restarted
+  without Ctrl+C, it's restarted after 3 s (30 s after repeated quick
+  crashes); if the page stops answering three checks in a row, it's restarted
   within ~2 min. The password stays in that window's memory (never on disk),
-  so signed-in viewers stay signed in. Logged to `data/launcher.log`.
+  so signed-in viewers stay signed in. Logged to
+  `$IMAGE_FILTERER_DATA_ROOT/launcher.log`, with a desktop notification and
+  the webhook below.
 - **A live watch survives restarts.** It resumes into the same run, with the
   photos already in it known, so nothing is re-added. Stop watching (or a new
   watch) ends it for good.
-- **Problems are visible.** A red banner for every viewer, a desktop
-  notification, and optionally a webhook (`IMAGE_FILTERER_ALERT_WEBHOOK`) when
-  Lucid is unreachable, the export folder is missing, the watch died, or
-  auto-export/text reading report errors.
+- **Problems are visible.** A health check every 10 s looks for: the watched
+  folder unreadable (Lucid unmounted), the export folder missing, the watch
+  died, auto-export or text-reading errors, under 8 GB of free memory, or
+  under 20 GB free on the data disk. A problem that lasts 30 s becomes a red
+  banner for every viewer (`GET /api/health`), a desktop notification on the
+  server, and — with `IMAGE_FILTERER_ALERT_WEBHOOK` — a Slack/Teams post, sent
+  again when it clears.
 - **A missing export folder is never recreated.** If Lucid drops, exports
   pause ("Export folder unavailable") and auto-export catches up when it's
   back, without duplicates; nothing is written to local disk.
@@ -917,8 +1028,11 @@ image_filterer/
   encoders.py     frozen SigLIP2 / FaRL encoders
   face.py         YuNet detection + MediaPipe landmarks + quality scalars
   features.py     feature extraction, cached by content hash
-  cache_io.py     the content-addressed cache
-  ranker.py       pairwise RankNet MLP — train, score, save/load
+  common.py       feature extraction with progress reporting for the ingest bar
+  cache_io.py     the content-addressed cache (+ in-memory LRU, sha1 memo)
+  imaging.py      opening files (RAW via preview), decode checks, CPU worker pool
+  ranker.py       RankerV2: per-block standardise + PCA-64, pairwise RankNet,
+                  3-seed ensemble; load_any() also loads v1 checkpoints
   technical.py    sharpness / exposure / eye-openness metrics
   bursts.py       EXIF + embedding burst clustering
   shots.py        wide/medium/close tagging
@@ -926,17 +1040,24 @@ image_filterer/
   pipeline.py     shared steps: burst columns, search index, CSV writers
   ingest.py       inference-only ingestion of one folder
   hotfolder.py    polling watcher that folds new arrivals into a live run
+  mirror.py       local copies of photos from network folders
   ocr.py          text on screen: background GPU OCR workers, cached by content
   textmatch.py    typo-tolerant matching of a query against the text read
   auto_export.py  live selection into review folders
+  export.py       copying originals to the host export folder
+  stars.py        per-run star storage
+  health.py       problem checks, banner and alerts
   train.py        offline training entry point
   server.py       Flask app + HTTP API
   db.py           SQLite run registry
-  templates/      the single-page UI
-  model/          the shipped ranker checkpoint
+  templates/      the single-page UI and login page
+  model/          the shipped ranker (ranker.pt; ranker_v1.pt kept for rollback)
 scripts/          asset fetcher
-tests/            smoke tests
+tests/            smoke, regression and UI tests
 docs/             architecture and tuning notes
+start.sh          native launcher and supervisor
+start-spark.sh    Docker launcher (DGX Spark)
+Dockerfile.spark · compose.spark.yaml · deploy/spark/   the Docker deployment
 ```
 
 ## Known limits

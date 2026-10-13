@@ -16,20 +16,22 @@ dependencies = [
     "pillow>=10.0",
     "flask>=3.0",
     "opencv-python>=4.9",       # YuNet face detection
-    "open_clip_torch>=2.24",    # SigLIP2 context encoder + FaRL backbone
+    "open_clip_torch>=3.3",    # SigLIP2 context encoder + FaRL backbone (tested 3.3)
     "transformers>=4.40",       # tokenizer used by the default SigLIP2 encoder
     "mediapipe>=0.10",          # eyelid / mouth landmarks
-    "ultralytics>=8.2",         # YOLOv8-pose person detection
+    "ultralytics>=8.4.155",         # YOLO11x-pose: people, keypoints (fp16 needs quantize=, 8.4.155+)
     "tqdm>=4.65",
     "rawpy>=0.18",              # RAW (CR3/ARW/NEF…) via the embedded JPEG preview
     "pyexiv2>=2.8",             # EXIF that PIL won't surface: RAW timestamps, Sony lens model
+    "psutil>=5.9",              # health alerts (low memory)
 ]
 
 [project.optional-dependencies]
 # Compatibility extra retained for existing install commands; transformers is now required.
 encoders = []
-# Text on screen (OCR) for search and auto-export: PP-OCRv4 on TensorRT. Needs a
-# CUDA 13 GPU; without these the app runs normally and says OCR is unavailable.
+# Text on screen (OCR) for search and auto-export: PP-OCR (v3 detector, v4
+# recognizer) on TensorRT with a CUDA 13 GPU, else RapidOCR's torch engine.
+# Without these the app runs normally and says OCR is unavailable.
 ocr = [
     "rapidocr>=3.9,<3.10",      # ocr.py patches its TensorRT engine builder; re-check before bumping
     "onnxruntime>=1.18",        # rapidocr imports it even when TensorRT does the work

@@ -237,7 +237,7 @@ def _env_int(name: str, default: int) -> int:
 @dataclass
 class OcrConfig:
     """Reading the text in each photo (slides, screens, signs) for search and
-    auto-export. PP-OCRv4 English on TensorRT; see ``ocr.py``.
+    auto-export. PP-OCR English (v3 det, v4 rec) on TensorRT; see ``ocr.py``.
 
     Every frame is read — burst-mates don't reliably show the same slide.
     On a GB10, decoding included: 703 photos in ~21 s with four workers (3: 26 s,

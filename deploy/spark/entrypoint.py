@@ -6,6 +6,10 @@ import subprocess
 import sys
 import tempfile
 
+# Run as /app/deploy/spark/entrypoint.py, Python only puts this folder on the
+# path; `scripts` (asset list) lives at the app root.
+sys.path.insert(0, "/app")
+
 
 def gpu_check():
     import torch
@@ -33,7 +37,7 @@ def warmup(sample):
     from image_filterer.encoders import build_text_encoder
     from image_filterer.features import FeatureExtractor
     from image_filterer.imaging import open_image
-    from image_filterer.ranker import load_model, predict, stack_features
+    from image_filterer.ranker import feature_blocks, load_any, predict, stack_features
     from image_filterer.config import RankerConfig
     from image_filterer.scene import SceneAnalyzer
 
@@ -56,15 +60,21 @@ def warmup(sample):
             bundles = extractor.extract_paths([path])
         finally:
             extractor.close()
-        model, rc, _ = load_model(cfg.model_path, torch.device("cuda"))
-        scores = predict(model, stack_features(bundles, RankerConfig(**rc)), torch.device("cuda"))
-        if not np.isfinite(scores).all():
-            raise RuntimeError("Ranker produced non-finite scores")
+        # Same order as ingest: the speaker's pose/expression feed the ranker.
         scene = SceneAnalyzer(cfg.scene, cache, device="0")
         try:
-            scene.raw(bundles[0].sha1, lambda: open_image(path))
+            scenes = [scene.analyze(bundles[0].sha1, lambda: open_image(path))]
         finally:
             scene.close()
+        device = torch.device("cuda")
+        kind, model = load_any(cfg.model_path, device)
+        if kind == "v2":
+            scores = model.score(feature_blocks(bundles, scenes), device)
+        else:
+            net, rc, _ = model
+            scores = predict(net, stack_features(bundles, RankerConfig(**rc)), device)
+        if not np.isfinite(scores).all():
+            raise RuntimeError("Ranker produced non-finite scores")
         text = build_text_encoder(cfg.features.context_encoder)
         if not np.isfinite(text.embed_texts(["a person on stage"])).all():
             raise RuntimeError("Text encoder produced non-finite features")

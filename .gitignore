@@ -13,10 +13,11 @@ venv/
 *.pth
 *.onnx
 *.task
-yolov8*.pt
+yolo*.pt          # e.g. yolo11x-pose.pt if downloaded into the working directory
 
-# The production ranker IS committed (2 MB) — keep it exempt from the *.pt rule.
+# The production rankers ARE committed (2 MB each) — keep them exempt.
 !image_filterer/model/ranker.pt
+!image_filterer/model/ranker_v1.pt
 
 # Run storage, feature cache, and datasets live outside the repo by default
 # ($IMAGE_FILTERER_DATA_ROOT). These entries only matter if someone points them in-tree.

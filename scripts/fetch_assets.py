@@ -1,21 +1,23 @@
 """Download the third-party model weights the pipeline needs.
 
-Four files, none of which are in git (they total ~790 MB):
+Four files, none of which are in git (they total ~770 MB):
 
   FaRL-Base-Patch16-LAIONFace20M-ep64.pth   652 MB  face embedding
   face_detection_yunet_2023mar.onnx         227 KB  face detection
   face_landmarker.task                      3.7 MB  eyelid/mouth landmarks
   yolo11x-pose.pt                           113 MB  people + body keypoints (speaker, shot type, hero)
 
-They land in ``$IMAGE_FILTERER_ASSET_DIR`` (default ``~/.local/share/image-filterer/assets``).
+They land in ``$IMAGE_FILTERER_ASSET_DIR``, by default ``$IMAGE_FILTERER_DATA_ROOT/assets``
+(``./data/assets`` when started as the README's Setup / ``start.sh`` do).
 Re-running is cheap: anything already present is skipped.
 
     python -m scripts.fetch_assets
     python -m scripts.fetch_assets --from-cache /path/to/old/cache   # copy instead of download
 
-The two encoder backbones (SigLIP2-SO400M for context, and the ViT-B-16 skeleton
-FaRL loads into) are pulled by open_clip on first use and cached in
-``~/.cache/huggingface`` — they need no action here.
+Downloaded on first use instead, into ``$HF_HOME`` (``./data/huggingface`` with
+``start.sh``): SigLIP2-SO400M, the context encoder (~4.5 GB). FaRL's ViT-B-16
+skeleton is built locally and downloads nothing. The OCR models (~24 MB) are
+fetched by RapidOCR into ``$IMAGE_FILTERER_DATA_ROOT/models/ocr`` on first start.
 """
 
 from __future__ import annotations

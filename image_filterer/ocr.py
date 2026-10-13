@@ -1,6 +1,6 @@
 """Read the text in every photo — slides, screens, signs — on the GPU.
 
-PP-OCRv4 (English detector + recognizer, via RapidOCR) compiled with
+PP-OCR (English v3 detector + v4 recognizer, via RapidOCR) compiled with
 TensorRT. Measured on 60 GTC Taipei stage photos at 2048 px on the GB10,
 images already decoded:
 
@@ -114,7 +114,7 @@ def _patch_tensorrt_builder() -> None:
 
 
 def build_reader(model_dir: Path, engine: str, max_side: int):
-    """A RapidOCR instance: English PP-OCRv4 mobile det + rec, no angle
+    """A RapidOCR instance: English PP-OCR mobile det (v3) + rec (v4), no angle
     classifier (stage text is upright; it costs time and needs extra models)."""
     from rapidocr import EngineType, LangDet, LangRec, ModelType, OCRVersion, RapidOCR
 
