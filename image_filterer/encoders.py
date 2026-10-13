@@ -53,16 +53,25 @@ class FrozenEncoder:
         """Stable identifier used as part of the cache key."""
         return f"{self.name}@{self.nominal_input_size}d{self.embed_dim}"
 
-    @torch.inference_mode()
+    def prepare(self, img: Image.Image) -> torch.Tensor:
+        """This encoder's own preprocessing (resize/crop/normalize). Thread-safe
+        and GIL-releasing, so callers can run it on worker threads — resizing a
+        25 MP photo to the model's input on one core was what starved the GPU."""
+        return self.preprocess(img.convert("RGB"))
+
     def embed_images(self, images: Sequence[Image.Image], batch_size: int = 8) -> np.ndarray:
-        if len(images) == 0:
+        from .imaging import ordered_map
+        return self.embed_tensors(list(ordered_map(self.prepare, images)), batch_size=batch_size)
+
+    @torch.inference_mode()
+    def embed_tensors(self, tensors: Sequence[torch.Tensor], batch_size: int = 8) -> np.ndarray:
+        """Embed tensors already produced by :meth:`prepare`, in order."""
+        if len(tensors) == 0:
             return np.zeros((0, self.embed_dim), dtype=np.float32)
         use_amp = self.device.type == "cuda"
         feats: List[np.ndarray] = []
-        for start in range(0, len(images), batch_size):
-            batch_imgs = images[start : start + batch_size]
-            tensors = [self.preprocess(img.convert("RGB")) for img in batch_imgs]
-            x = torch.stack(tensors, dim=0).to(self.device, non_blocking=True)
+        for start in range(0, len(tensors), batch_size):
+            x = torch.stack(list(tensors[start : start + batch_size]), dim=0).to(self.device, non_blocking=True)
             if use_amp:
                 with torch.autocast(device_type="cuda", dtype=torch.float16):
                     z = self._encode_batch(x)

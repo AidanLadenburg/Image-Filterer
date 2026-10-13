@@ -12,12 +12,81 @@ import os
 import sqlite3
 import threading
 import uuid
+from collections import OrderedDict
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
+
+
+class MemoryLRU:
+    """Process-wide, byte-capped LRU in front of the on-disk cache.
+
+    Entries are content-addressed (sha1 + kind + encoder), so they never go
+    stale. Live hot-folder runs re-load every photo of the run on each ingest;
+    without this, a 10k-photo run spends ~20 s per ingest re-reading .npz
+    files. ~8 KB per photo, so the default 1 GB covers ~100k photos; past the
+    cap the least recently used entries drop back to disk reads."""
+
+    def __init__(self, max_bytes: int) -> None:
+        self.max_bytes = max_bytes
+        self._d: "OrderedDict[Any, tuple]" = OrderedDict()
+        self._lock = threading.Lock()
+        self.bytes = 0
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key):
+        with self._lock:
+            hit = self._d.get(key)
+            if hit is None:
+                self.misses += 1
+                return None
+            self._d.move_to_end(key)
+            self.hits += 1
+            return hit[0]
+
+    def __contains__(self, key) -> bool:
+        with self._lock:
+            return key in self._d
+
+    def put(self, key, value, nbytes: int) -> None:
+        if nbytes > self.max_bytes:
+            return
+        with self._lock:
+            old = self._d.pop(key, None)
+            if old is not None:
+                self.bytes -= old[1]
+            self._d[key] = (value, nbytes)
+            self.bytes += nbytes
+            while self.bytes > self.max_bytes:
+                _, (_, n) = self._d.popitem(last=False)
+                self.bytes -= n
+
+    def clear(self) -> None:
+        with self._lock:
+            self._d.clear(); self.bytes = 0; self.hits = 0; self.misses = 0
+
+    def stats(self) -> Dict[str, float]:
+        with self._lock:
+            return {"mem_cache_mb": round(self.bytes / 2**20, 1), "mem_cache_entries": len(self._d),
+                    "mem_cache_hits": self.hits, "mem_cache_misses": self.misses}
+
+
+MEMORY = MemoryLRU(int(float(os.environ.get("IMAGE_FILTERER_MEM_CACHE_MB", "1024")) * 2**20))
+_ENTRY_OVERHEAD = 400            # dict/key/ndarray headers, roughly
+
+
+def _frozen(arrays: Dict[str, np.ndarray]) -> tuple:
+    """Read-only copies (callers share them) and their size in bytes."""
+    out = {}
+    for k, a in arrays.items():
+        a = np.array(a, copy=True)
+        a.setflags(write=False)
+        out[k] = a
+    return out, sum(a.nbytes for a in out.values()) + _ENTRY_OVERHEAD
 
 
 def _atomic_write(path: Path, write) -> None:
@@ -111,15 +180,23 @@ class Sha1Memo:
                 stats[k] = None
 
         known: Dict[str, str] = {}
+        for k in keys:                  # in-memory first: a live run asks for every photo, every ingest
+            st = stats.get(k)
+            if st is not None:
+                digest = MEMORY.get(("sha1", k) + st)
+                if digest is not None:
+                    known[k] = digest
+        ask = [k for k in keys if k not in known]
         with closing(self._connect()) as c:
             # Chunked so we stay under SQLite's variable limit on big folders.
-            for i in range(0, len(keys), 500):
-                part = keys[i:i + 500]
+            for i in range(0, len(ask), 500):
+                part = ask[i:i + 500]
                 q = f"SELECT path, size, mtime_ns, sha1 FROM sha1_memo WHERE path IN ({','.join('?' * len(part))})"
                 for path, size, mtime_ns, digest in c.execute(q, part):
                     st = stats.get(path)
                     if st is not None and st[0] == size and st[1] == mtime_ns:
                         known[path] = digest
+                        MEMORY.put(("sha1", path) + st, digest, 200 + len(path))
 
         fresh: List[tuple] = []
         out: List[str] = []
@@ -130,6 +207,7 @@ class Sha1Memo:
                 st = stats.get(k)
                 if st is not None:
                     fresh.append((k, st[0], st[1], digest))
+                    MEMORY.put(("sha1", k) + st, digest, 200 + len(k))
             out.append(digest)
 
         if fresh:
@@ -151,9 +229,10 @@ class FeatureCache:
     def __post_init__(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def _entry_dir(self, sha1: str) -> Path:
+    def _entry_dir(self, sha1: str, create: bool = False) -> Path:
         sub = self.root / sha1[:2] / sha1[2:4]
-        sub.mkdir(parents=True, exist_ok=True)
+        if create:                       # only writers; reads stay syscall-free on memory hits
+            sub.mkdir(parents=True, exist_ok=True)
         return sub
 
     def _entry_path(self, sha1: str, kind: str, encoder_id: str) -> Path:
@@ -162,11 +241,18 @@ class FeatureCache:
         return self._entry_dir(sha1) / f"{sha1}.{kind}.{eid}.npz"
 
     def has(self, sha1: str, kind: str, encoder_id: str = "none") -> bool:
-        return self._entry_path(sha1, kind, encoder_id).exists()
+        path = self._entry_path(sha1, kind, encoder_id)
+        return path in MEMORY or path.exists()
 
     def load(self, sha1: str, kind: str, encoder_id: str = "none") -> Dict[str, np.ndarray]:
-        with np.load(self._entry_path(sha1, kind, encoder_id), allow_pickle=False) as z:
-            return {k: z[k] for k in z.files}
+        path = self._entry_path(sha1, kind, encoder_id)
+        hit = MEMORY.get(path)
+        if hit is not None:
+            return dict(hit)
+        with np.load(path, allow_pickle=False) as z:
+            arrays, nbytes = _frozen({k: z[k] for k in z.files})
+        MEMORY.put(path, arrays, nbytes)
+        return dict(arrays)
 
     def save(
         self,
@@ -182,16 +268,25 @@ class FeatureCache:
             with open(tmp, "wb") as f:
                 np.savez_compressed(f, **arrays)
 
-        _atomic_write(self._entry_path(sha1, kind, encoder_id), _write)
+        self._entry_dir(sha1, create=True)
+        path = self._entry_path(sha1, kind, encoder_id)
+        _atomic_write(path, _write)
+        MEMORY.put(path, *_frozen(arrays))
 
     # --- side-channel: per-image scalar metadata that is cheap to recompute ---
 
     def save_meta(self, sha1: str, kind: str, payload: Dict[str, Any]) -> None:
-        path = self._entry_dir(sha1) / f"{sha1}.{kind}.meta.json"
-        _atomic_write(path, lambda tmp: tmp.write_text(json.dumps(payload)))
+        path = self._entry_dir(sha1, create=True) / f"{sha1}.{kind}.meta.json"
+        text = json.dumps(payload)
+        _atomic_write(path, lambda tmp: tmp.write_text(text))
+        MEMORY.put(path, text, len(text) + _ENTRY_OVERHEAD)
 
     def load_meta(self, sha1: str, kind: str) -> Optional[Dict[str, Any]]:
         path = self._entry_dir(sha1) / f"{sha1}.{kind}.meta.json"
-        if not path.exists():
-            return None
-        return json.loads(path.read_text())
+        text = MEMORY.get(path)
+        if text is None:
+            if not path.exists():
+                return None
+            text = path.read_text()
+            MEMORY.put(path, text, len(text) + _ENTRY_OVERHEAD)
+        return json.loads(text)

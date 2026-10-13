@@ -4,9 +4,10 @@ Why the pipeline is shaped this way, and what the defaults in `config.py` are
 worth. Read this before changing a threshold — most of them were settled by an
 experiment, and several obvious-looking "improvements" were tried and rejected.
 
-Numbers below all come from a single labeled keynote shoot: 3,316 unique frames
-after dedup, of which 392 `Good`, 2,204 `Bad`, 13 must-find, 725 held aside
-unlabeled.
+The labeled data is one keynote (GTC San Jose, March 2026): 2,628 unique photos,
+424 `Good`, 13 must-find (`Top-5to10`), plus 725 `Questionable` (ignored).
+Visual checks use two unlabeled shoots: GTC Taipei (703 photos, 3 cameras) and
+a multi-camera test with candids (256).
 
 ---
 
@@ -15,223 +16,233 @@ unlabeled.
 ```
 raw images
     │
-    ├─ Stage 0 — Feature extraction (cached by content hash)
-    │    • SigLIP2-SO400M on the full frame        1152-d
-    │    • FaRL-Base/16 on the face crop            512-d
-    │    • face-quality scalars                       7-d
-    │                                          → 1671-d input vector
+    ├─ Features (cached by content hash)
+    │    • SigLIP2-SO400M, whole frame (224 px)          1152-d
+    │    • FaRL-B/16 on the largest face (YuNet)          512-d
+    │    • face measurements (eye/mouth openness, sharpness …)  7
     │
-    ├─ Stage 1 — Pairwise RankNet (MLP, 256 hidden)
-    │    Trained Good-vs-Bad, 4096 pairs/epoch.
-    │    Half of every epoch's pairs are drawn WITHIN a burst.
-    │                                          → score_s1
+    ├─ Scene (cached by content hash; scene.py)
+    │    • YOLO11x-pose @1280 → people + 17 body keypoints
+    │    • the speaker (see "Choosing the speaker")
+    │    • the speaker's face, cropped from a ~3000 px decode →
+    │      MediaPipe: 52 expression blendshapes + head yaw/pitch/roll
+    │    • how lit the background is around the speaker
     │
-    ├─ Stage 2 — Technical metrics (sharpness, exposure, eye-openness)
-    │    Computed and stored per frame. The hard-reject gate is OFF and the
-    │    soft penalty weight is 0, so this does not currently move scores.
-    │                                          → score_s12_after_hard
+    ├─ Ranker v2 (ranker.RankerV2)
+    │    each embedding → 64 dims (standardise + PCA), + face measurements
+    │    + expression → pairwise RankNet, half the pairs inside a burst,
+    │    3 seeds averaged                                → score_s1
     │
-    ├─ Burst layer — cluster by EXIF camera + time + embedding similarity,
-    │    pick one representative per burst, rank bursts by that frame
+    ├─ Moments ("bursts") — camera + time + similarity, see below
     │
-    └─ Tagging — shot scale (SigLIP2 zero-shot) + subject/hero (YOLOv8-pose)
+    └─ Tags — shot scale from keypoints; subject / hero from the speaker
 ```
 
-Everything expensive is cached by `(sha1, kind, encoder_id)`, so re-ingesting a
-folder — or ingesting one that overlaps a previous shoot — costs almost nothing.
+Per new photo this costs ~25 ms GPU (pose) + ~12 ms CPU (face) on top of the
+encoders. Everything is cached, so re-ingesting a folder is nearly free. The
+disk cache has a process-wide in-memory LRU in front of it (`cache_io.MEMORY`,
+capped by `IMAGE_FILTERER_MEM_CACHE_MB`, default 1 GB ≈ 100k photos), and EXIF
+capture times are memoized by path/size/mtime, so a live run that re-ingests
+all of its photos on every arrival stays at ~2.5 s per ingest at 10k photos.
+Pixel-identical dedup finds candidate pairs with one GPU matmul pass.
 
 ---
 
-## Why a pairwise ranker
+## How ranking quality is measured
 
-The task is "which of these two frames would the photographer publish," not "is
-this frame good." A pairwise RankNet loss matches that directly and sidesteps the
-class-imbalance problem (2,204 negatives vs 392 positives). The model only ever
-sees pairs; the absolute score is meaningless except as an ordering.
+The original holdout split individual photos, so near-identical burst-mates
+landed on both sides and the reported AUC (0.96) mostly measured memory. The
+tests now (in `train.py`, written to `model/training_summary.json`):
 
-### Within-burst pair sampling — the single biggest win
+- **Leave one photographer out.** Train on everyone else, rank only that
+  photographer's photos. Camera, lens and position are constant inside the
+  test set, so "who shot it" can't help, and the photographer is unseen — the
+  closest thing to a new event.
+- **Timeline slices.** Five contiguous parts of the event; train on four.
 
-A ranker trained on uniformly-sampled pairs learns *scene-level* cues, because
-most random Good/Bad pairs come from different moments and are trivially
-separable. It then fails at the job that actually matters: picking the best frame
-out of eight near-identical ones.
+Metrics are per **moment** (a burst counts as a keeper if any frame is Good,
+scored by its best frame), because that's what the grid and auto-export show:
+average precision, the share of keepers in the top 10% of moments, and how
+often the best frame of a mixed burst is a Good one. No burst is ever split
+between training and testing. Only ~80 bursts mix Good and Bad, so the
+best-frame number moves ±5 points by chance; the 13 must-finds are too few to
+separate models.
 
-Sweeping the fraction of pairs sampled within a single burst:
+| | moment AP (photographer out / timeline) | best frame picked (photographer out / timeline) |
+|---|---|---|
+| v1 (shipped before) | 0.655 / 0.633 | 70% / 71% |
+| v2 | 0.694 / 0.684 | 77% / 83% |
 
-| `within_burst_pair_fraction` | Holdout AUC | Best-Good ranked #1 in its burst | Bad ranked #1 |
+---
+
+## What the labels actually say — and the confound
+
+`Good` means "picked from that photographer's own set". How selective that was
+varies by photographer: four of them handed over **only** their picks (129
+photos, 100% Good — 5% of the photos but 30% of the keepers), the rest kept
+3-20%. Those four were mostly at wide positions: 67% of their keepers have a
+small or no speaker, against 6% for everyone else.
+
+A model trained on all of it learns *who shot it* — their lens look, position
+and framing — as "good". On a new shoot (GTC Taipei) that put empty dark
+stages and slides at the top: frames with no face scored +1.4 above frames with
+one, and per-camera medians differed by 1.5. On the labeled keynote itself the
+held-out metrics can't see this (both versions score 0.69), because the
+confound is present in test and train alike. The decision was made on the new
+shoot, by eye.
+
+So `train.py` leaves out **photographer-days with only one kind of label**.
+That also drops a January day where everything is `Bad`.
+
+The old no-face defaults made it worse: eye openness defaulted to 1.0 ("far
+wider than any real eye") when no face was found. They're now typical values
+(`features.NO_FACE_EAR / NO_FACE_MAR`); `face_detected` already says the face
+is missing.
+
+---
+
+## What each signal is worth (held-out, this data)
+
+| Signal | Effect | Cost | |
 |---|---|---|---|
-| 0.0 | 0.887 | 59% | 26% |
-| 0.3 | 0.886 | 76% | 8% |
-| **0.5** ← default | **0.887** | **84%** | **4%** |
-| 0.7 | 0.874 | 83% | 1% |
-| 1.0 | 0.660 | 85% | 1% |
+| SigLIP2 whole frame + FaRL face + face measurements | the core | — | kept |
+| Compressing embeddings to 64 dims each | stops overfitting; best frame 70% → 75-80% | free | kept |
+| **Speaker expression** (blendshapes + head pose) | **AP +0.04, best frame +8-13 points** | ~12 ms CPU | kept |
+| Body keypoints | no ranking gain alone; needed for the face crop, shot type, hero | ~25 ms GPU | kept |
+| SigLIP2 @384 on whole frame / speaker / face | no consistent gain | ~20 ms each | rejected |
+| 10 pretrained quality / aesthetic models (pyiqa: LAION-aes, TOPIQ, MUSIQ, NIMA, CLIP-IQA+, LIQE, …) | near random for editor picks (AP 0.30-0.45 vs 0.33 random) | ~30 ms each | rejected |
+| Local VLM "photo editor" judge (Qwen2.5-VL-7B) | 0.46 alone; *lowered* AP combined with the ranker, also as a top-20% re-ranker | ~800 ms | rejected |
 
-0.5 buys 25 points of within-burst accuracy for no loss of global AUC. 1.0
-collapses because only ~75 of 733 bursts are mixed Good+Bad — push everything
-in-burst and the cross-burst supervision that global ranking depends on vanishes.
+| Model / training | Result | |
+|---|---|---|
+| Pairwise RankNet, half the pairs within a burst, 3 seeds | best | kept |
+| Logistic regression | AP 0.60 | rejected |
+| Gradient-boosted trees on measurements only | AP 0.56-0.60 | rejected |
+| Pairs only within the same photographer | AP 0.56-0.65 | rejected |
+| Separate within-burst re-ranker | small gain, needs a 384 px crop model | rejected |
+| Per-camera feature centering | removes real signal too (AP 0.85 → 0.70) | rejected |
+
+The limit is the labels (one event, few mixed bursts), not the model: every
+approach plateaus at AP 0.65-0.70. More labeled events — with real rejects —
+would move it more than any model change tested.
+
+### Within-burst pair sampling (still the single biggest training choice)
+
+A ranker trained on uniformly-sampled pairs learns scene-level cues and fails
+at picking the best of eight near-identical frames. On the v1 features, sweeping
+the share of pairs drawn inside a burst moved best-Good-ranked-#1 from 59%
+(0.0) to 84% (0.5) with AUC flat; 1.0 collapses (too few mixed bursts). 0.5 is
+kept.
 
 ---
 
-## Burst clustering
+## Moments (bursts)
 
-Camera identity comes from EXIF only — no filename heuristics, which break the
-moment a second body or a card reader renames anything:
+Camera identity is EXIF only (Canon `BodySerialNumber`; Sony `Make/Model/Lens`,
+since the ILCE-1 exposes no serial; else `Make/Model`). RAW timestamps come from
+`pyexiv2` — without it every RAW frame is its own burst.
 
-- Canon → `BodySerialNumber`
-- Sony → `Make/Model/LensModel` (the ILCE-1 exposes no body serial, so the lens
-  is the next-best per-rig discriminator; this is what `pyexiv2` is for)
-- otherwise → `Make/Model`
-
-RAW files are read through `pyexiv2` rather than PIL, which can't open a CR3 at
-all — and the embedded JPEG preview we decode them through carries no
-`DateTimeOriginal`. Without `pyexiv2` a RAW frame gets no timestamp and becomes
-its own single-frame burst, which is why it is a required dependency rather than
-an optional one.
-
-Within one camera, consecutive frames merge when:
+Within one camera, in time order, a frame joins the current moment when:
 
 ```
-dt <= 0.6s                                  → always merge
-OR (dt <= 8.0s AND cosine(emb_full) >= 0.92) → merge if near-identical
+dt <= 0.6 s                                               → always
+dt <= 30 s, moment <= 45 s long,
+   cosine >= 0.91 to any of the moment's last 3 frames,
+   cosine >= 0.89 to its first frame                      → same moment
 ```
 
-The second rule catches the photographer who holds a composition, takes three
-frames over five seconds, and shifts slightly. Time-only clustering at 2.5 s gave
-889 bursts; adding the similarity rule gives **733**, with 139 fewer singletons.
+The 8 s window used before split ~1 in 4 consecutive moments that were
+near-identical (same pose, same slide, a pause in shooting) into separate grid
+tiles. 45 s windows without the guards chained minutes of the same slide into
+one 77-118-frame "moment"; the length cap and the first-frame test stop that.
+Comparing with the last 3 frames keeps one odd frame (a turn, a flash) from
+splitting a moment. GTC Taipei: 203 → 177 moments; candid test: 65 → 47.
+Reviewed merges were the same moment.
 
-**Dedup** runs at two levels: sha1 (byte-identical copies across folders) and
-embedding cosine ≥ 0.9995 with differing sha1 (JPEG re-encodes, ICC changes,
-Finder's " 2.jpg"). That threshold is deliberately extreme — anything lower
-starts merging genuine burst-mates.
-
----
-
-## Face detection: why YuNet, not MediaPipe
-
-MediaPipe's FaceLandmarker is built for selfie-distance frontal faces. On stage
-photography it detected a face in **~2% of frames** — meaning the FaRL embedding,
-the eye-aspect-ratio, and every expression signal were dead channels for 98% of
-the dataset, silently filled with neutral fallbacks.
-
-YuNet finds the face box on the full frame (fast, robust to small faces), the box
-is expanded and cropped, and MediaPipe then runs *on that crop*, where the face
-fills the frame and eyelid/mouth landmarks are reliable. Detection went to
-**~97%**, and holdout AUC from 0.887 to **0.959**.
-
-Cache keys are namespaced by detector, so switching backends never returns stale
-crops.
+**Dedup**: sha1, plus embedding cosine ≥ 0.9995 with differing sha1 (re-encodes).
 
 ---
 
-## The hard-reject is off, on purpose
+## Choosing the speaker
 
-Stage 2 originally slammed frames to −∞ for closed eyes, severe blur, or clipped
-exposure. An audit of all 126 hard-rejected frames found **29 keepers** among
-them. The exposure rule was the worst offender — a dark stage background reads as
-"clipped" — and was dropping roughly 23% of good frames.
-
-The MLP already sees sharpness, exposure and EAR as input features, so it learns
-to rank those frames down where they genuinely are worse, without a cliff. The
-metrics are still computed and written to `ranked.csv`; they're informational.
-
-If you re-enable it (`technical.hard_reject_enabled = True`), audit the rejects
-before trusting the output.
+Everything below depends on picking the right person. The largest box was
+wrong surprisingly often: figures on a projected slide, the backs of audience
+heads in the foreground. Now each confident person is scored by height × how
+clearly their face and shoulders are visible; people cut by the left/right edge
+count for less, and low, barely visible figures are skipped (`scene.subject`).
 
 ---
 
 ## Shot scale
 
-Face geometry was the obvious approach and it failed for the same reason
-MediaPipe did: with a face detected in 2% of frames, `face_frac` collapsed
-everything to "wide."
+From where the frame cuts the speaker's body (`shots.shot_from_pose`):
 
-Instead each frame is scored on a continuous axis inside the SigLIP2 joint space
-that search already uses:
+- **wide** — the whole body is in frame (feet visible), the person is small,
+  or there's no prominent person
+- **medium** — cut above the feet
+- **close** — cut less than 2.2 head-units below the shoulders, *and* the head
+  (eyes → shoulders) is ≥ 0.20 of the frame height, *and* the person fills ≥ 60%
+  of it — so an upward-angled shot of a distant speaker, merely cropped at the
+  waist, isn't a close-up
 
-```
-closeness = cos(emb_full, close_prototype) - cos(emb_full, wide_prototype)
-```
+Head-units (eyes → shoulders, vertical) don't shrink when the speaker turns
+sideways, unlike shoulder width. At a keynote shot on long lenses most frames
+are full body, so most are wide.
 
-Each prototype is the mean text embedding of a small prompt ensemble. No pixels
-are reprocessed — this runs on cached embeddings. Two thresholds split the axis
-into wide / medium / close, calibrated by visual audit to roughly 40 / 55 / 6 %
-on the reference shoot.
-
-**The prompts and the thresholds are a matched set.** `closeness` is defined
-relative to those specific prototypes, so editing the prompt ensemble in
-`shots.py` invalidates `wide_max` and `close_min` — retune both together.
-
-Note that "close" means *tight framing*, not "contains a face" — a frame-filling
-robot is close.
+The previous SigLIP zero-shot axis ("a close-up of a face" vs "a wide shot of a
+stage") was fooled by darkness and content — near-black frames came out
+"close", full-length speakers "medium". It remains only as a fallback for runs
+without pose data.
 
 ---
 
-## Subject and hero tagging
+## Subject and hero
 
-YOLOv8-pose gives person boxes; from them plus a background-brightness measure,
-each frame gets a cached raw vector:
+- **Subject**: "people" if the speaker's box covers ≥ 4% of the frame, else "stage".
+- **Hero**: the speaker alone (nobody else at least half their height), filling
+  ≥ 45% of the frame height, with ≤ 6% of the area **around** them lit
+  (1.5 body widths either side, head to feet, every person excluded).
 
-```
-[largest_person_area, n_prominent_persons, second_person_area, bg_bright_frac]
-```
+Measuring brightness only around the speaker keeps the stage lighting rig along
+the top edge from disqualifying a clean shot. The raw measurements are cached,
+so retuning a threshold reprocesses nothing.
 
-`bg_bright_frac` is the fraction of *non-person* pixels above a luma floor,
-measured on a 200px-long-side grayscale copy. A clean dark stage sits near 0; a
-lit screen, an equipment rack, or a slide lights it up.
+---
 
-Classification is applied on top at read time:
+## Face detection: YuNet, not MediaPipe alone
 
-- **subject** = `people` if `area >= person_min_area`, else `stage`
-- **hero** = big enough, no second prominent person, and a dark background
+MediaPipe's FaceLandmarker is built for selfie-distance faces; on stage
+photography it found a face in ~2% of frames. YuNet finds the face box, the box
+is cropped, and MediaPipe runs on the crop (~97% detection; AUC 0.887 → 0.959
+at the time). The expression crop in scene.py is located from body keypoints
+instead, so it is the speaker's face rather than the largest one.
 
-Because the raw vector is what's cached, **re-tuning any threshold costs
-nothing** — no images are reprocessed, only the run needs re-ingesting to rewrite
-the columns. These thresholds were set by eye and are the most obviously
-improvable part of the system; a hand-marked set of true hero shots would let
-them be fit properly.
+---
+
+## The hard-reject is off, on purpose
+
+Stage 2 originally slammed frames to −∞ for closed eyes, blur or clipped
+exposure. 29 of 126 hard-rejected frames were keepers — a dark stage reads as
+"clipped". The metrics are still computed and stored; they don't move scores.
 
 ---
 
 ## Semantic search
 
-The SigLIP2 text tower shares a joint space with the cached full-frame image
-embeddings, so text→image search needs no new model and no re-embedding — just a
-dot product against `search_index.npy`. Warm queries are ~50 ms.
-
-Results are ordered by pure cosine relevance and collapsed to one hit per burst
-(the best-matching frame), so a search doesn't return eight copies of one moment.
-
-This only works when the context encoder has a text tower. SigLIP2 (the default)
-does; DINOv2 and C-RADIO don't, and search is disabled if you switch to them.
-
----
-
-## Tried and rejected
-
-| Idea | Outcome |
-|---|---|
-| **VLM pairwise tournament** (stage 3) | Worked — a hosted VLM behind an internal API gateway, Swiss-style pairings with Bradley-Terry aggregation — but cost $1–2 per run and traded away AUC. Removed from the production path. |
-| **Must-find as a third class** | Improves recall of memorized must-finds, doesn't generalize past a 0.1 pair fraction. Off. |
-| **SigLIP body-crop embedding** | The pose ablation showed it doesn't earn its inference cost. Off; saves one encoder pass per image. |
-| **Valence/arousal (HSEmotion)** | Off in production; its optional experimental channel is excluded from the shipped ranker. |
-| **Face-geometry shot classification** | Killed by the 2% detection rate. Replaced by the zero-shot axis. |
-| **Soft technical penalty** (`alpha > 0`) | Hurt must-find recall — face-quality metrics are unreliable when the face is small. Set to 0. |
+The SigLIP2 text tower shares a joint space with the cached whole-frame
+embeddings, so text→image search is a dot product against `search_index.npy`
+(~15-50 ms). Text on screen (OCR) is matched separately and ranked first; see
+`ocr.py` / `textmatch.py`.
 
 ---
 
 ## Worth trying next
 
-Roughly in order of cost-to-value:
-
-1. **Burst score = mean of top 3** rather than the single representative. Large
-   bursts currently win on an order statistic — with 30 frames, one gets lucky.
-2. **Cross-event evaluation.** Train on one shoot, evaluate on another. This is
-   the only honest test of whether the model transfers, and it has never been run.
-3. **Fit the scene thresholds** against hand-marked hero shots instead of by eye.
-4. **List-wise loss per burst** instead of pairwise — treats each mixed burst as
-   a softmax ranking task, a stronger signal where several frames are good.
-5. **Down-weight in-burst pairs by similarity** (`1 - cos^k`) to remove
-   label-noise gradient from the ~30% of failure cases that are near-identical
-   pairs labeled differently.
-6. **A feedback loop in the UI** — approve/reject buttons writing to a picks
-   file, used as relabeling input for the next training round.
+1. **More labeled events.** The single biggest lever. A review mode that stores
+   training labels separately from stars (and asks "which frame is best?"
+   inside a burst — exactly what the expression model learns from) would
+   produce them; `train.py` already takes several events
+   (`--train-root A --train-root B`) and reports the held-out tests, so a new
+   model ships only if it beats the current one.
+2. **Leave-one-event-out testing** once there are two or more events.
+3. **Burst score from the top 2-3 frames** instead of the single best.

@@ -21,10 +21,12 @@
   .stats { color: var(--text-dim); font-size: 12px;
     white-space: nowrap; }
   select, input, button { font: inherit; color: var(--text); }
-  select, #search-input, #run-name-input {
+  [hidden] { display: none !important; }   /* beats display:flex on .row etc. */
+  select, input[type=text], input[type=search], input:not([type]) {
     background: #14161c; border: 1px solid var(--border); border-radius: 7px;
-    padding: 6px 10px; outline: none; }
-  select:focus, #search-input:focus, #run-name-input:focus {
+    padding: 6px 10px; outline: none; color: var(--text); }
+  input::placeholder { color: var(--text-dim); opacity: 1; }
+  select:focus, input[type=text]:focus, input[type=search]:focus, input:not([type]):focus {
     border-color: var(--accent); box-shadow: 0 0 0 2px rgba(120,170,255,.15); }
   .btn { cursor: pointer; background: #1d212a; border: 1px solid var(--border);
     border-radius: 7px; padding: 6px 12px; }
@@ -48,6 +50,8 @@
   .badge.hero { background: #4a3a12; color: #f0c96b; border: 1px solid #7a5f20; }
   .badge.starred { background: #4a3a12; color: var(--star); border: 1px solid #7a5f20; }
   .badge.starred-other { background: #16283a; color: var(--star-other); border: 1px solid #2c4a68; }
+  .badge.text-hit { background: #13321f; color: #8fe0a8; border: 1px solid #2a6a40;
+                    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .owner-seg { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
   .owner-seg button { cursor: pointer; background: #14161c; border: none; color: var(--text-dim);
     padding: 5px 10px; font-size: 12px; }
@@ -101,6 +105,27 @@
     border-bottom: 1px solid var(--border); }
   #upload-panel .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   #upload-selection { color: var(--text-dim); font-size: 13px; }
+  #upload-panel .panel-title { font-size: 14px; }
+  .source-opts { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+  .source-opt { flex: 1 1 260px; display: flex; gap: 8px; align-items: flex-start; cursor: pointer;
+    border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: #161920; }
+  .source-opt:has(input:checked) { border-color: var(--accent); background: #181d28; }
+  .source-opt span { display: block; color: var(--text-dim); font-size: 12px; margin-top: 2px; }
+  .src-row { margin-top: 10px; }
+  .watch-banner { margin-top: 12px; padding: 8px 12px; border: 1px solid var(--good); border-radius: 8px;
+    background: rgba(80, 200, 120, .08); }
+  .watch-banner .hf-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); display: inline-block; }
+  #host-dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px; width: min(640px, 92vw); }
+  #host-dialog::backdrop { background: rgba(0,0,0,.55); }
+  #host-dialog .hd-path { font-family: ui-monospace, monospace; font-size: 12px; color: var(--text-dim);
+    overflow-wrap: anywhere; margin: 6px 0 10px; }
+  #host-dialog .hd-list { max-height: 50vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+  #host-dialog .hd-list button { display: block; width: 100%; text-align: left; background: none; border: 0;
+    border-bottom: 1px solid var(--border); padding: 8px 12px; cursor: pointer; }
+  #host-dialog .hd-list button:hover { background: #1d212a; }
+  #host-dialog .hd-note { font-size: 12px; color: var(--text-dim); min-height: 1.2em; margin-top: 8px; }
+  code.host-path { font-size: 12px; color: var(--text); background: #14161c; padding: 2px 6px; border-radius: 5px; }
   #upload-selection.ready { color: var(--good); }
   .progress-wrap { margin-top: 12px; display: none; }
   .progress-bar { height: 10px; background: #0c0d10; border: 1px solid var(--border);
@@ -206,6 +231,15 @@
   .modal .body { display: flex; gap: 14px; padding: 14px; overflow: hidden; }
   .main-img { flex: 1; display: flex; align-items: center; justify-content: center; position: relative; min-width: 0; }
   .main-img img { max-width: 100%; max-height: 74vh; object-fit: contain; border-radius: 8px; }
+  /* Text on screen: boxes drawn over the photo, in fractions of its size */
+  #ocr-overlay { position: absolute; pointer-events: none; overflow: visible; }
+  #ocr-overlay polygon { fill: none; stroke: #9ad7ff; stroke-width: 1.5; stroke-dasharray: 4 3;
+                         vector-effect: non-scaling-stroke; pointer-events: auto; }
+  #ocr-overlay polygon.hit { fill: rgba(64, 220, 120, .18); stroke: #40dc78; stroke-width: 2.5;
+                             stroke-dasharray: none; }
+  #ocr-chip { flex: 0 0 auto; color: var(--text-dim); font-size: 12px; white-space: nowrap; }
+  #ocr-chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+                   display: inline-block; margin-right: 5px; animation: pulse 1.2s ease-in-out infinite; }
   .modal-nav { position: absolute; top: 50%; transform: translateY(-50%); background: rgba(20,22,28,.8);
     border: 1px solid var(--border); color: var(--text); font-size: 22px; width: 40px; height: 52px;
     border-radius: 8px; cursor: pointer; }
@@ -244,6 +278,19 @@
   #settings-panel h3 { margin-bottom: 8px; font-size: 14px; }
   #settings-panel p { color: var(--text-dim); overflow-wrap: anywhere; }
   .settings-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+  #settings-panel h4 { margin: 14px 0 4px; font-size: 13px; }
+  .ae-check { display: block; margin: 6px 0 10px; }
+  .ae-controls label, #ae-folders label { display: inline-flex; align-items: center; gap: 6px; }
+  #ae-folders { margin-top: 10px; }
+  .ae-advanced { margin-top: 10px; }
+  .ae-advanced summary { cursor: pointer; color: var(--text-dim); font-size: 13px; }
+  .ae-advanced p { font-size: 12px; margin: 6px 0 0; }
+  .ae-prompt { display: grid; grid-template-columns: minmax(90px, 1fr) auto minmax(140px, 3fr) auto auto; gap: 6px; margin-bottom: 6px; }
+  .ae-prompt input, #settings-panel select { background: #1d212a; color: inherit; border: 1px solid var(--border); border-radius: 6px; padding: 5px 7px; }
+  .ae-folder-out { margin: 10px 0; }
+  .ae-folder-out .ae-thumbs { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+  .ae-folder-out img { height: 64px; border-radius: 4px; }
+  #ae-chip { flex: 0 0 auto; color: var(--text-dim); font-size: 12px; white-space: nowrap; }
   #settings-close { margin-left: auto; }
   #export-toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 200; padding: 12px 18px; background: var(--panel); border: 1px solid var(--accent); border-radius: 8px; max-width: 90vw; }
 </style>
@@ -260,7 +307,7 @@
     <input id="search-input" type="search" placeholder="Search…  e.g. “person on stage”" autocomplete="off" spellcheck="false" />
     <button id="search-clear" title="Clear (Esc)" style="display:none">✕</button>
   </span>
-  <button class="btn primary" id="btn-upload">＋ Upload folder</button>
+  <button class="btn primary" id="btn-upload" title="Start a run from photos on this device or a folder on the host">＋ New run</button>
   <button class="btn" id="settings-btn" aria-expanded="false" aria-controls="settings-panel">⚙ Settings</button>
   </div>
   <div class="toolbar-filters" role="group" aria-label="Photo filters and sorting" tabindex="0">
@@ -294,7 +341,9 @@
   </div>
   <div class="toolbar-status">
     <span class="stats" id="stats" aria-live="polite"></span>
-  <span id="hf-chip" title="A folder is being watched — new photos are ingested automatically">
+  <span id="ae-chip" hidden title="Auto-export is copying the best new photos to the review folders"></span>
+  <span id="ocr-chip" hidden title="Text on screen is read on the GPU after photos appear. Until it's done, text search and Text-on-screen folders don't include the newest photos yet."></span>
+  <span id="hf-chip" title="A host folder is being watched — new photos are added automatically">
     <span class="hf-dot"></span><span id="hf-text">watching</span>
   </span>
   </div>
@@ -305,11 +354,60 @@
   <h3>Export location</h3>
   <p id="export-location" aria-live="polite">Browser downloads</p>
   <div class="settings-row">
-    <button class="btn" id="export-local">Choose local folder</button>
-    <button class="btn" id="export-browser">Use browser downloads</button>
+    <button class="btn" id="export-browser">Local device: browser downloads</button>
+    <button class="btn" id="export-local">Local device: choose a folder…</button>
+    <button class="btn" id="export-server">Host folder</button>
   </div>
+  <p>Host export folder: <code class="host-path" id="host-export-path">not set</code>
+    <button class="btn" id="host-export-change">Choose host folder…</button></p>
   <p id="local-export-help"></p>
   <p id="export-status" role="status"></p>
+  <h3>Auto-export (this shoot)</h3>
+  <p>As photos arrive, the best ones are copied into review folders — one per category, one per shot on your list, and one for stars. Nothing already exported is ever removed.</p>
+  <p id="ae-note"></p>
+  <p id="ae-dest-row" hidden><button class="btn" id="ae-choose-host">Choose host export folder…</button></p>
+  <div id="ae-body" hidden>
+    <label class="ae-check"><input type="checkbox" id="ae-enabled"> <strong>Auto Export</strong></label>
+    <div id="ae-settings">
+    <div class="settings-row ae-controls">
+      <label title="Each folder gets the top this-% of its own photos; Look-alikes decides how many near-identical frames go">Strictness
+        <select id="ae-top">
+          <option value="2">Top 2% — only standouts</option><option value="5">Top 5% — very strict</option>
+          <option value="10">Top 10% — strict</option><option value="20">Top 20% — balanced</option>
+          <option value="35">Top 35% — generous</option>
+        </select></label>
+      <label title="Early in a shoot there’s little to compare against, so a photo waits until it’s clearly among the best">Speed
+        <select id="ae-speed">
+          <option value="fast">Fast — sends sooner, a few extra</option>
+          <option value="balanced">Balanced</option>
+          <option value="careful">Careful — fewer, surer picks</option>
+        </select></label>
+      <label title="A photo is skipped if it looks almost the same as one already sent to that folder — the next frame of the same burst, or the same pose minutes later. Keep all sends every frame of each selected moment.">Look-alikes
+        <select id="ae-variety">
+          <option value="off">Keep all</option><option value="some">Skip near-identical</option>
+          <option value="more">Skip look-alikes</option><option value="most">Maximum variety</option>
+        </select></label>
+    </div>
+    <details class="ae-advanced">
+      <summary>Advanced</summary>
+      <div class="settings-row">
+        <label>Minimum per folder
+          <select id="ae-min"><option value="0">none</option><option value="3">3</option><option value="5">5</option><option value="10">10</option></select></label>
+      </div>
+      <p>Category folders (Hero, Close…) send their top % of photos — for a rare category that can be nothing, so each still gets up to this many of its best photos, as long as they’re also good next to the rest of the shoot. Shot-list folders send every match regardless.</p>
+    </details>
+    <div class="settings-row" id="ae-folders" aria-label="Folders"></div>
+    <h4>Shot list</h4>
+    <p>Each becomes a folder with every photo that matches (look-alikes skipped). <b>Looks like</b>: describe the shot in plain words. <b>Text on screen</b>: words shown on a slide, screen or sign — e.g. a product name.</p>
+    <p id="ae-ocr-note" hidden></p>
+    <div id="ae-prompts"></div>
+    <div class="settings-row">
+      <button class="btn" id="ae-add">+ Add shot</button>
+      <button class="btn dl-primary" id="ae-save">Save</button>
+    </div>
+    </div>
+    <p id="ae-msg" role="status"></p>
+  </div>
   <h3>Browsing</h3>
   <div class="settings-row">
   <div class="ctl" title="Thumbnail size — + / − to step, 0 to reset">
@@ -335,33 +433,65 @@
   </div>
 </div>
 
-<div id="upload-panel">
+<div id="upload-panel" aria-label="New run">
   <div class="row">
-    <input id="run-name-input" type="text" placeholder="Run name (optional — defaults to date/time)" style="width:280px" />
+    <b class="panel-title">New run</b>
+    <input id="run-name-input" type="text" placeholder="Run name (optional — defaults to the folder name)" style="width:320px" />
     <button class="btn" id="upload-cancel" style="margin-left:auto">Close</button>
   </div>
-  <div class="row" style="margin-top:10px">
-    <b style="font-size:12px;color:var(--text-dim);width:130px">Upload from device</b>
-    <input type="file" id="folder-input" webkitdirectory multiple style="display:none" />
-    <button class="btn" id="browse-btn">Select folder…</button>
-    <span id="upload-selection">No folder selected</span>
-    <button class="btn primary" id="ingest-btn" disabled>Upload &amp; ingest</button>
-  </div>
-  <div class="row" style="margin-top:8px">
-    <b style="font-size:12px;color:var(--text-dim);width:130px">Watch a folder</b>
-    <input id="hf-path-input" type="text" placeholder="/path/to/shared folder — new photos are ingested as they land" style="flex:1;min-width:280px" />
-    <button class="btn primary" id="hf-start-btn">Start watching</button>
-    <button class="btn" id="hf-stop-btn" style="display:none">Stop watching</button>
-  </div>
-  <div class="row" style="margin-top:4px">
-    <span style="width:130px"></span>
+  <div class="row watch-banner" id="watch-banner" hidden>
+    <span class="hf-dot"></span>
+    <span><b>Watching</b> <code class="host-path" id="watch-banner-path"></code></span>
     <span id="hf-status" style="font-size:12px;color:var(--text-dim)"></span>
+    <button class="btn" id="hf-stop-btn" style="margin-left:auto">Stop watching</button>
+  </div>
+  <div class="source-opts" role="radiogroup" aria-label="Where are the photos?">
+    <label class="source-opt"><input type="radio" name="run-source" value="local" checked>
+      <div><b>Local device</b><span>Upload a folder of photos from this computer.</span></div></label>
+    <label class="source-opt"><input type="radio" name="run-source" value="host">
+      <div><b>Host folder</b><span>Photos already on the host (the Spark) — e.g. a card dump on the Lucid share. Can keep watching for new ones during an event.</span></div></label>
+  </div>
+  <div class="row src-row src-local">
+    <input type="file" id="folder-input" webkitdirectory multiple style="display:none" />
+    <button class="btn" id="browse-btn">Choose folder on this device…</button>
+    <span id="upload-selection">No folder chosen</span>
+  </div>
+  <div class="row src-row src-host" hidden>
+    <input id="hf-path-input" type="text" placeholder="Host folder, e.g. /mnt/lucid/cards" style="flex:1;min-width:280px" aria-label="Host folder" />
+    <button class="btn" id="host-browse-btn">Browse host…</button>
+  </div>
+  <div class="row src-row src-host" hidden>
+    <label><input type="checkbox" id="host-watch" checked> Keep watching for new photos (live event) — they’re added to this run as they land</label>
+  </div>
+  <div class="row src-row">
+    <button class="btn primary" id="ingest-btn" disabled>Start run</button>
   </div>
   <div class="progress-wrap" id="progress-wrap">
     <div class="progress-bar"><div class="fill" id="progress-fill"></div></div>
     <div id="progress-msg"></div>
   </div>
 </div>
+
+<dialog id="host-dialog" aria-label="Choose a host folder">
+  <b id="hd-title">Choose a host folder</b>
+  <div class="hd-path" id="hd-path"></div>
+  <div class="settings-row" style="margin-bottom:8px">
+    <button class="btn" id="hd-up">↑ Up</button>
+    <button class="btn" id="hd-roots">Top level</button>
+    <button class="btn" id="hd-mkdir" style="margin-left:auto" disabled>＋ New folder</button>
+  </div>
+  <div class="settings-row" id="hd-mkdir-row" hidden style="margin-bottom:8px">
+    <input id="hd-mkdir-name" type="text" maxlength="100" placeholder="New folder name" aria-label="New folder name" style="flex:1" />
+    <button class="btn primary" id="hd-mkdir-ok">Create</button>
+    <button class="btn" id="hd-mkdir-cancel">Cancel</button>
+  </div>
+  <div class="hd-list" id="hd-list"></div>
+  <div class="hd-note" id="hd-note"></div>
+  <div class="settings-row" style="margin-top:12px; justify-content:flex-end">
+    <button class="btn" id="hd-cancel">Cancel</button>
+    <button class="btn primary" id="hd-use" disabled>Use this folder</button>
+  </div>
+</dialog>
 
 <div id="export-toast" role="status" hidden></div>
 <main>
@@ -387,7 +517,7 @@
     <span class="progress-count" id="progress-count"></span>
     <button class="btn" id="load-more">Load more</button>
   </div>
-  <div class="footer-hint" id="footer-hint" style="display:none">Click a tile to expand the burst. ← / → to step. S to star, D to download. Esc to close. + / − to resize thumbnails.</div>
+  <div class="footer-hint" id="footer-hint" style="display:none">Click a tile to expand the burst. ← / → to step. S to star, D to download, T to show the text found. Esc to close. + / − to resize thumbnails.</div>
 </main>
 
 <div class="modal-bg" id="modal-bg">
@@ -400,6 +530,7 @@
       <div class="main-img">
         <button class="modal-nav prev" id="modal-prev" aria-label="Previous">‹</button>
         <img id="modal-img" />
+        <svg id="ocr-overlay" viewBox="0 0 1 1" preserveAspectRatio="none" style="display:none"></svg>
         <button class="modal-nav next" id="modal-next" aria-label="Next">›</button>
       </div>
       <div class="sidebar">
@@ -419,6 +550,8 @@ const $ = s => document.querySelector(s);
 const $$ = s => Array.from(document.querySelectorAll(s));
 const PAGE = 50;
 const state = {
+  watchRunId: null,       // run the host folder watch feeds (listed before its first batch)
+  waitingFirst: false,    // selected run is being watched but has no photos yet
   bursts: [], shots: new Set(), subject: "", hero: false, query: "", offset: 0, total: 0,
   loading: false, openBurst: null, openIndex: -1, searchError: null, hasRun: false,
   starredOnly: false,      // the "★ Starred" view toggle
@@ -539,6 +672,7 @@ const fmtBytes = n =>
            : Math.max(1, Math.round(n / 1e3)) + " KB";
 
 function downloadOne(path, btn) {
+  if (exportTarget === "server") return exportServer({ paths: [path] }, btn, btn?.textContent, null);
   if (exportTarget !== "browser") return exportMany([path], btn, btn?.textContent, null);
   if (btn) { btn.classList.add("busy"); setTimeout(() => btn.classList.remove("busy"), 800); }
   // A plain anchor click keeps this a native browser download — no JS buffering.
@@ -681,7 +815,7 @@ async function exportMany(paths, btn, label, note) {
   refreshExportSettings();
   let written = 0, skipped = 0, failed = 0, lastError = "";
   try {
-    if (!canExport) throw new Error("This browser cannot write to your local folder. Choose another export location in Settings.");
+    if (!canExport) throw new Error("This browser can’t write to a folder on your local device. Choose another export location in Settings.");
     const dir = await getExportDir(false);
     if (!dir) return;
     saveExportTarget("local");
@@ -695,7 +829,11 @@ async function exportMany(paths, btn, label, note) {
         const res = await fetch(dlUrl(path, runId));
         if (!res.ok) throw new Error(`Could not read original (${res.status}).`);
         const blob = await res.blob();
-        const filename = path.split(/[\\/]/).pop() || "photo.jpg";
+        // The server may hand out the RAW twin of a RAW+JPEG pair — name the
+        // file after what was actually sent, not the ranked JPEG.
+        const cd = res.headers && res.headers.get ? (res.headers.get("content-disposition") || "") : "";
+        const sent = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd);
+        const filename = (sent && decodeURIComponent(sent[1])) || path.split(/[\\/]/).pop() || "photo.jpg";
         const outcome = await writeFileToDir(dir, filename, blob);
         if (outcome === "skipped") skipped++; else written++;
       } catch (e) {
@@ -719,15 +857,64 @@ async function exportMany(paths, btn, label, note) {
   }
 }
 
+/** Server-side export: the server copies originals into its configured export
+ *  folder (e.g. the team's LucidLink share). Works from any browser — nothing
+ *  passes through this device. Polls the background job for progress. */
+async function exportServer(body, btn, label, note) {
+  if (exportBusy) return;
+  exportBusy = true;
+  if (btn) btn.disabled = true;
+  refreshExportSettings();
+  const show = msg => {
+    if (btn) btn.textContent = msg;
+    if (note) note.textContent = msg;
+    reportExport(msg);
+  };
+  try {
+    if (!serverExport.enabled) throw new Error("No host export folder is chosen yet. Choose one in Settings → Export location.");
+    const res = await fetch("/api/export/server", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...body, run_id: state.runId, viewer: state.viewer, owner: state.starOwner }),
+    });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || "Could not start the export.");
+    let s = { done: false, done_count: 0, total: d.total };
+    while (!s.done) {
+      show(`Exporting ${s.done_count}/${s.total} to “${d.dest}”…`);
+      await new Promise(r => setTimeout(r, 1000));
+      const r = await fetch("/api/export/server/" + encodeURIComponent(d.job));
+      if (!r.ok) throw new Error("Lost track of the export job — check the export folder.");
+      s = await r.json();
+    }
+    if (s.error) throw new Error(`Export failed: ${s.error}`);
+    const x = s.result;
+    const not = x.total - x.written - x.skipped - x.failed;
+    show(`Exported ${x.written} to “${s.dest}”` +
+         (x.skipped ? `, ${x.skipped} already there` : "") +
+         (x.failed ? `, ${x.failed} failed: ${x.last_error}` : "") +
+         (not ? `; ${not} not attempted` : "") +
+         (s.missing ? `; ${s.missing} missing on the host` : ""));
+  } catch (e) {
+    if (note) note.textContent = e.message;
+    reportExport(e.message);
+  } finally {
+    exportBusy = false;
+    if (btn) { btn.disabled = false; btn.textContent = label; }
+    refreshExportSettings();
+  }
+}
+
 // Export preferences are per browser.
 let exportTarget = "browser";
+let serverExport = { enabled: false, name: "", path: "" };   // filled from /api/state
 try {
   const saved = localStorage.getItem("exportTarget");
-  if (["browser", "local"].includes(saved)) exportTarget = saved;
+  if (["browser", "local", "server"].includes(saved)) exportTarget = saved;
 } catch (_) {}
 function exportLocationLabel() {
-  if (exportTarget === "local") return exportDirHandle ? `Local folder / ${exportDirHandle.name}` : "Local folder — choose or authorize a folder";
-  return "Browser downloads (uses your browser’s download settings)";
+  if (exportTarget === "server") return serverExport.enabled ? `Host folder — ${serverExport.path} (on the Spark)` : "Host folder — not chosen yet";
+  if (exportTarget === "local") return exportDirHandle ? `Local device — folder “${exportDirHandle.name}”` : "Local device — choose or authorize a folder";
+  return "Local device — browser downloads (your browser’s download settings)";
 }
 function saveExportTarget(target) {
   exportTarget = target;
@@ -737,13 +924,167 @@ function saveExportTarget(target) {
 }
 function refreshExportSettings() {
   $("#export-location").textContent = exportLocationLabel();
+  $("#export-server").disabled = exportBusy;
+  $("#host-export-path").textContent = serverExport.path || "not set";
   $("#export-local").disabled = !canExport || exportBusy;
   $("#export-browser").disabled = exportBusy;
 }
+/** Pick the host export folder in the host browser; resolves true once set. */
+function chooseHostExportFolder() {
+  return new Promise(resolve => {
+    openHostDialog("Choose the host export folder (exports and auto-export go here)", serverExport.path, async p => {
+      const res = await fetch("/api/host/export_dir", { method: "POST", headers: { "Content-Type": "application/json" },
+                                                        body: JSON.stringify({ path: p }) });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) return d.error || "Couldn’t use that folder.";
+      serverExport = { enabled: !!d.export_dir, name: d.export_dir.split("/").pop(), path: d.export_dir };
+      refreshExportSettings();
+      if (!$("#settings-panel").hidden) loadAuto();
+      resolve(true);
+      return null;
+    });
+  });
+}
+
+// ---- auto-export (per shoot, stored on the server) ----
+let aeData = null;          // last /api/auto_export payload
+const AE_FOLDER_HELP = {
+  Best: "Best overall", Hero: "Solo subject, clean background", Close: "Tight framing", Medium: "Medium framing",
+  Wide: "Wide framing", People: "People in frame", Stage: "Stage, screen or product", Starred: "Anything anyone stars",
+};
+async function loadAuto() {
+  const body = $("#ae-body");
+  if (!state.runId) { body.hidden = true; $("#ae-note").textContent = "Select a shoot to set up auto-export."; return; }
+  try {
+    const res = await fetch("/api/auto_export?run_id=" + state.runId);
+    if (!(res.headers.get("content-type") || "").includes("json"))
+      throw new Error("The app on the host needs restarting to pick up this update (auto-export isn’t available yet).");
+    aeData = await res.json();
+    if (!res.ok) throw new Error(aeData.error || "Could not load auto-export settings.");
+  } catch (e) { $("#ae-note").textContent = e.message; body.hidden = true; return; }
+  body.hidden = false;
+  $("#ae-msg").textContent = "";
+  renderAuto(aeData.settings);
+  renderAutoStatus();
+}
+function renderAuto(s) {
+  $("#ae-enabled").checked = !!s.enabled;
+  $("#ae-enabled").disabled = !aeData.export_configured;
+  syncAutoCollapse();
+  renderAutoDest(s);
+  const top = $("#ae-top"), v = String(Math.round(s.top_percent));
+  if (![...top.options].some(o => o.value === v)) top.insertAdjacentHTML("beforeend", `<option value="${v}">Top ${v}%</option>`);
+  top.value = v;
+  $("#ae-speed").value = s.speed; $("#ae-variety").value = s.variety;
+  const mn = $("#ae-min"), mv = String(s.min_per_folder);
+  if (![...mn.options].some(o => o.value === mv)) mn.insertAdjacentHTML("beforeend", `<option value="${mv}">${mv}</option>`);
+  mn.value = mv;
+  $("#ae-folders").innerHTML = aeData.categories.map(k =>
+    `<label title="${esc(AE_FOLDER_HELP[k] || k)}"><input type="checkbox" data-folder="${esc(k)}"${s.outputs[k] ? " checked" : ""}> ${esc(k)}</label>`).join("");
+  $("#ae-prompts").innerHTML = "";
+  (s.prompts || []).forEach(p => addPromptRow(p));
+  const ocr = aeData.text_on_screen || {}, note = $("#ae-ocr-note");
+  note.hidden = ocr.enabled !== false;
+  note.textContent = ocr.enabled === false ? `Text on screen isn’t available on this host (${ocr.error || "OCR is off"}); those folders stay empty.` : "";
+}
+function syncAutoCollapse() {
+  $("#ae-settings").hidden = !$("#ae-enabled").checked;
+}
+/** Where auto-export sends files — and, plainly, when it can't run. */
+function renderAutoDest(s) {
+  const ok = aeData.export_configured, note = $("#ae-note");
+  $("#ae-dest-row").hidden = ok;
+  note.textContent = ok
+    ? `Sends to the host folder ${aeData.export_dir}/<run name>/Auto on the Spark.`
+    : (s.enabled ? "Paused — no host export folder. " : "") +
+      "Auto Export copies photos on the host (the Spark), so it keeps running with no browser open — it can’t send to your local device. Choose a host export folder to use it.";
+}
+function addPromptRow(p = { name: "", text: "", match: "normal", kind: "describe" }) {
+  const row = document.createElement("div");
+  row.className = "ae-prompt";
+  row.innerHTML = `<input placeholder="Folder name" maxlength="40" value="${esc(p.name)}" aria-label="Folder name">
+    <select class="ae-kind" aria-label="Match by" title="Match what the photo looks like, or the words shown in it">
+      <option value="describe">Looks like</option><option value="text">Text on screen</option></select>
+    <input maxlength="200" value="${esc(p.text)}" aria-label="Shot description or text">
+    <select class="ae-match" aria-label="How closely it must match" title="How closely a photo must match the description">
+      <option value="loose">Loose</option><option value="normal">Normal</option><option value="strict">Strict</option></select>
+    <button class="btn" aria-label="Remove shot">✕</button>`;
+  const kind = row.querySelector(".ae-kind"), match = row.querySelector(".ae-match"), text = row.querySelectorAll("input")[1];
+  const sync = () => {
+    const isText = kind.value === "text";
+    match.hidden = isText;           // text is matched forgivingly (typos in what's read), no strictness to pick
+    text.placeholder = isText ? "e.g. Vera Rubin" : "e.g. a robot on stage";
+  };
+  kind.value = p.kind === "text" ? "text" : "describe";
+  match.value = p.match || "normal";
+  kind.addEventListener("change", sync); sync();
+  row.querySelector("button").addEventListener("click", () => row.remove());
+  $("#ae-prompts").appendChild(row);
+}
+function collectAuto() {
+  const outputs = {};
+  $$("#ae-folders input[data-folder]").forEach(i => { outputs[i.dataset.folder] = i.checked; });
+  const prompts = $$("#ae-prompts .ae-prompt").map(r => {
+    const [name, text] = r.querySelectorAll("input");
+    return { name: name.value.trim(), text: text.value.trim(), match: r.querySelector(".ae-match").value,
+             kind: r.querySelector(".ae-kind").value };
+  }).filter(p => p.text);
+  return { enabled: $("#ae-enabled").checked, top_percent: Number($("#ae-top").value), speed: $("#ae-speed").value,
+           min_per_folder: Number($("#ae-min").value),
+           variety: $("#ae-variety").value, outputs, prompts };
+}
+async function saveAuto() {
+  const res = await fetch("/api/auto_export", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ run_id: state.runId, settings: collectAuto() }) });
+  const d = await res.json();
+  if (!res.ok) { $("#ae-msg").textContent = d.error || "Could not save."; return; }
+  aeData = d; renderAuto(d.settings);
+  $("#ae-msg").textContent = d.settings.enabled ? "Saved — Auto Export on." : "Saved — Auto Export off.";
+  renderAutoStatus();
+}
+function autoStatusText(st) {
+  if (!st || !st.enabled) return "";
+  const sent = Object.values(st.sent || {}).reduce((a, b) => a + b, 0);
+  const waiting = Object.values(st.waiting || {}).reduce((a, b) => a + b, 0);
+  const ago = st.last_run ? Math.max(0, Math.round(Date.now() / 1000 - st.last_run)) : null;
+  return `${sent} sent` + (waiting ? ` · ${waiting} waiting for their moment to finish` : "") +
+    (st.unread ? ` · reading text on ${st.unread} photos` : "") +
+    (ago !== null ? ` · checked ${ago}s ago` : "") + (st.last_error ? ` · problem: ${st.last_error}` : "");
+}
+function renderAutoStatus() {
+  const st = aeData && aeData.status, chip = $("#ae-chip");
+  const text = aeData && aeData.export_configured ? autoStatusText(st) : "";
+  chip.hidden = !text; chip.textContent = text ? `auto-export: ${text.split(" · ")[0]}` : "";
+  if (!$("#settings-panel").hidden && st && st.enabled && aeData.export_configured) {
+    const per = Object.entries(st.sent || {}).map(([k, n]) => `${k} ${n}`).join(", ");
+    $("#ae-note").textContent = `On → host folder ${aeData.export_dir}/${(st.dest || "").split("/").slice(1).join("/")}. ${text}${per ? ` (${per})` : ""}.`;
+  }
+}
+async function pollAuto() {
+  if (!state.runId) { $("#ae-chip").hidden = true; return; }
+  try {
+    const res = await fetch("/api/auto_export?run_id=" + state.runId);
+    if (!res.ok) return;
+    const d = await res.json();
+    if (aeData && aeData.settings && d.settings) aeData.status = d.status;
+    else aeData = d;
+    renderAutoStatus();
+  } catch (e) {}
+}
+function initAuto() {
+  $("#ae-choose-host").addEventListener("click", () => chooseHostExportFolder());
+  $("#ae-add").addEventListener("click", () => addPromptRow());
+  $("#ae-save").addEventListener("click", saveAuto);
+  // Ticking/unticking saves straight away: the settings (and Save) collapse
+  // when it's off, so there'd be nothing left to click.
+  $("#ae-enabled").addEventListener("change", () => { syncAutoCollapse(); saveAuto(); });
+}
+
 function openSettings() {
   $("#settings-panel").hidden = false;
   $("#settings-btn").setAttribute("aria-expanded", "true");
   refreshExportSettings();
+  loadAuto();
   $("#settings-close").focus();
 }
 function closeSettings() {
@@ -752,6 +1093,12 @@ function closeSettings() {
   $("#settings-btn").focus();
 }
 let toastTimer;
+function showToast(message) {
+  const toast = $("#export-toast");
+  toast.textContent = message; toast.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.hidden = true; }, 8000);
+}
 function reportExport(message) {
   $("#export-status").textContent = message;
   const toast = $("#export-toast");
@@ -762,12 +1109,16 @@ function reportExport(message) {
 function initSettings() {
   $("#settings-btn").addEventListener("click", () => $("#settings-panel").hidden ? openSettings() : closeSettings());
   $("#settings-close").addEventListener("click", closeSettings);
-  $("#local-export-help").textContent = canExport ? "All download and export buttons use this location. Local folders are remembered on this browser." : "Local folder selection requires Chrome or Edge on HTTPS or localhost. Use browser downloads instead.";
+  $("#local-export-help").textContent = canExport ? "All download and export buttons use this location. A local-device folder is remembered by this browser; the host folder is shared by everyone." : "Choosing a folder on your local device needs Chrome or Edge. Use browser downloads or the host folder instead.";
   $("#export-local").addEventListener("click", async () => {
     const dir = await getExportDir(true);
     if (dir) saveExportTarget("local");
   });
   $("#export-browser").addEventListener("click", () => saveExportTarget("browser"));
+  $("#export-server").addEventListener("click", async () => {
+    if (serverExport.enabled || await chooseHostExportFolder()) saveExportTarget("server");
+  });
+  $("#host-export-change").addEventListener("click", () => chooseHostExportFolder());
   refreshExportSettings();
   idbGet("exportDir").then(dir => {
     if (dir && !exportDirHandle) {
@@ -808,7 +1159,8 @@ function updateActionBar() {
   cs.disabled = !nMine;
   cs.textContent = nMine ? `☆ Clear my ${nMine}` : "☆ Clear my stars";
   const verb = exportTarget !== "browser" ? "Export" : "⬇ Download";
-  const hint = exportTarget !== "browser" ? "Full-resolution originals, copied to your export folder"
+  const hint = exportTarget === "server" ? "Full-resolution originals, copied to the host export folder on the Spark"
+             : exportTarget !== "browser" ? "Full-resolution originals, copied to your export folder"
                          : "Full-resolution originals, as a .zip";
   btn.title = exportLocationLabel();
   $("#export-change-btn").style.display = "";
@@ -955,6 +1307,7 @@ function renderTiles(bursts, append) {
           ${b.shot_type ? `<span class="badge shot-${b.shot_type}">${b.shot_type}</span>` : ""}
           ${b.subject_class === "stage" ? '<span class="badge">stage</span>' : ""}
           ${b.match_within_burst_rank && b.match_within_burst_rank>1 ? `<span class="badge">match #${b.match_within_burst_rank}</span>` : ""}
+          ${b.text_match ? `<span class="badge text-hit" title="Text on screen: ${esc(b.text_match)}">T “${esc(b.text_match)}”</span>` : ""}
           <button class="dl-btn" title="Download the full-resolution original">⬇</button>
         </div>
       </div>`;
@@ -1004,6 +1357,9 @@ function updateBar() {
     } else if (state.topPct < 100) {
       big = `Nothing in the top ${state.topPct}%`;
       sub = "Drag the Quality slider right to widen the net.";
+    } else if (state.waitingFirst) {
+      big = "Waiting for the first photos…";
+      sub = "Photos added to the watched host folder appear here as they’re processed — no need to reload.";
     } else big = "No images in this run";
     emptyEl.querySelector(".big").textContent = big;
     emptyEl.querySelector("div:last-child").textContent = sub;
@@ -1053,7 +1409,12 @@ async function loadPage(reset) {
       state.lastFrames = data.stats.n_frames;
       const st = data.stats;
       if (state.query) {
-        $("#stats").innerHTML = `<b>${state.total}</b> matches`;
+        // Text on screen is read in the background, so say when it's still going.
+        const tx = data.text || {};
+        const onScreen = tx.matches ? ` · <b>${tx.matches}</b> with the text on screen` : "";
+        const reading = tx.enabled && tx.total && tx.read < tx.total
+          ? ` · reading text on screen ${tx.read}/${tx.total}…` : "";
+        $("#stats").innerHTML = `<b>${state.total}</b> matches${onScreen}${reading}`;
       } else if (state.starredOnly) {
         $("#stats").innerHTML = `<b>${state.total}</b> starred frame${state.total === 1 ? "" : "s"}`;
       } else if (state.topPct < 100) {
@@ -1096,7 +1457,10 @@ async function openModal(burst) {
     const response = await fetch(
       `/api/burst/${burst.burst_id}?run_id=${runId || ""}&sort=${state.sort}` +
       `&viewer=${state.viewer}&top_pct=${state.starredOnly ? 100 : state.topPct}` +
-      (state.version != null ? `&version=${state.version}` : ""));
+      (state.version != null ? `&version=${state.version}` : "") +
+      // If the page's generation is gone, the server opens this photo's burst
+      // in the newest one instead of refusing.
+      (burst.rep_path ? `&path=${encodeURIComponent(burst.rep_path)}` : ""));
     const data = await response.json();
     if (requestId !== modalRequest || runId !== state.runId || state.openBurst !== burst) return;
     if (data.stale) {
@@ -1168,10 +1532,13 @@ function renderStrip(burst, keepPath) {
       <div style="font-size:11px;color:var(--text-dim);margin-top:8px">burst #${burst.burst_rank} · ${burst.burst_size} frame${burst.burst_size===1?"":"s"}</div>
       <a href="${imgUrl(f.path)}" target="_blank" rel="noopener" style="font-size:12px;color:var(--accent);display:inline-block;margin-top:8px">open full-res ↗</a>
       <div><button class="btn" id="modal-star" data-star-path="${esc(f.path)}" title="Star this frame (S)">☆ Star this frame</button></div>
-      <div><button class="btn" id="modal-dl" style="margin-top:6px" title="Download the full-resolution original (D)">⬇ Download original</button></div>`;
+      <div><button class="btn" id="modal-dl" style="margin-top:6px" title="Download the full-resolution original (D)">⬇ Download original</button></div>
+      <div><button class="btn" id="modal-text" style="margin-top:6px" disabled>Show all text (T)</button></div>`;
+    $("#modal-text").addEventListener("click", toggleAllText);
     $("#modal-star").addEventListener("click", () => toggleStar(f.path, null));
     $("#modal-dl").addEventListener("click", () => downloadOne(f.path, null));
     paintStars();
+    loadOcrLines(f);
   }
 
   // Keep looking at the same photo across a re-sort; otherwise open on the frame
@@ -1180,6 +1547,46 @@ function renderStrip(burst, keepPath) {
   const initial = rows.find(r => r.f.path === want)
                || rows.find(r => r.f.is_representative) || rows[0];
   if (initial) select(initial.f, initial.row);
+}
+
+// ---- text on screen in the viewer ----
+// Lines matching the search are outlined in green; "Show all text" (T) also
+// outlines every other line read. Boxes are fractions of the photo, so they
+// track it at any size.
+let ocrLines = null, ocrFor = null;
+async function loadOcrLines(f) {
+  ocrFor = f.path; ocrLines = null; drawOcr();
+  try {
+    const r = await fetch(`/api/ocr/lines?run_id=${state.runId || ""}&path=${encodeURIComponent(f.path)}` +
+                          `&q=${encodeURIComponent(state.query || "")}`);
+    const d = await r.json();
+    if (ocrFor !== f.path || !r.ok) return;
+    ocrLines = d;
+  } catch (e) { return; }
+  drawOcr();
+}
+function drawOcr() {
+  const svg = $("#ocr-overlay"), img = $("#modal-img"), btn = $("#modal-text");
+  const d = ocrLines, all = localStorage.getItem("showAllText") === "1";
+  const lines = d && d.read ? d.lines.filter(l => l.box && l.box.length === 4 && (all || l.match)) : [];
+  if (btn) {
+    btn.textContent = all ? "Hide text boxes (T)" : "Show all text (T)";
+    btn.disabled = !(d && d.read && d.lines.length);
+    btn.title = !d ? "" : !d.enabled ? "Text on screen is off on this host"
+      : !d.read ? "This photo's text hasn't been read yet" : !d.lines.length ? "No text found in this photo"
+      : `${d.lines.length} line${d.lines.length === 1 ? "" : "s"} of text found`;
+  }
+  // (style.display, not .hidden: <svg> has no hidden property)
+  if (!lines.length || !img.complete || !img.naturalWidth) { svg.style.display = "none"; return; }
+  Object.assign(svg.style, { left: img.offsetLeft + "px", top: img.offsetTop + "px",
+                             width: img.offsetWidth + "px", height: img.offsetHeight + "px" });
+  svg.innerHTML = lines.map(l =>
+    `<polygon class="${l.match ? "hit" : ""}" points="${l.box.map(([x, y]) => `${x},${y}`).join(" ")}"><title>${esc(l.text)}</title></polygon>`).join("");
+  svg.style.display = "block";
+}
+function toggleAllText() {
+  localStorage.setItem("showAllText", localStorage.getItem("showAllText") === "1" ? "0" : "1");
+  drawOcr();
 }
 
 function closeModal() {
@@ -1260,6 +1667,7 @@ async function pollVersion() {
     const d = await (await fetch("/api/version?run_id=" + state.runId)).json();
     if (runId !== state.runId || d.version % 2) return;
     if (state.version == null && d.version > 0 && !state.loading) {
+      if (state.waitingFirst) { state.waitingFirst = false; refreshRuns(state.runId); await refreshStars(); }
       await loadPage(true);
       return;
     }
@@ -1273,14 +1681,20 @@ async function pollVersion() {
 // ---- runs ----
 async function refreshRuns(selectId) {
   const data = await (await fetch("/api/state")).json();
+  serverExport = data.server_export || { enabled: false, name: "", path: "" };
+  refreshExportSettings();
+  updateActionBar();
   const sel = $("#run-select");
-  const runs = data.runs.filter(r => r.status === "ready");
+  // The run being watched is listed from the moment watching starts, not only
+  // once its first batch has been processed.
+  const runs = data.runs.filter(r => r.status === "ready" || r.id === state.watchRunId);
   const curId = selectId || (data.current && data.current.id);
   if (!runs.length) {
     sel.innerHTML = `<option value="">— no runs yet —</option>`;
   } else {
     sel.innerHTML = runs.map(r =>
-      `<option value="${r.id}"${r.id === curId ? " selected" : ""}>${esc(r.name)} (${r.n_images} imgs)</option>`).join("");
+      `<option value="${r.id}"${r.id === curId ? " selected" : ""}>${esc(r.name)} ${r.status === "ready"
+        ? `(${r.n_images} imgs)` : "— waiting for photos"}</option>`).join("");
   }
   return { runs, curId };
 }
@@ -1314,11 +1728,16 @@ async function selectRun(id) {
     updateBar();
     return;
   }
+  const selected = await response.json().catch(() => ({}));
+  if (requestId !== runRequest) return;
   state.runId = id; state.version = null; state.pending = null;
+  state.waitingFirst = !!selected.pending;
+  if ($("#settings-panel").hidden === false) loadAuto();   // auto-export settings are per shoot
   try { localStorage.setItem("runId", String(id)); } catch (e) {}
   state.pending = null; updateActivityBar();
   state.hasRun = true; state.query = ""; $("#search-input").value = ""; $("#search-clear").style.display = "none";
   clearSelection();       // a selection from the previous run means nothing here
+  if (state.waitingFirst) { updateBar(); return; }   // pollVersion loads the first batch when it lands
   await refreshStars();
   if (requestId === runRequest) await loadPage(true);
 }
@@ -1342,6 +1761,10 @@ async function pollActive() {
     }
     if (!a && _wasActive) { _wasActive = false; refreshRuns(state.runId); }
     updateActivityBar();
+    const t = d.text, chip = $("#ocr-chip");
+    chip.hidden = !t;
+    if (t) chip.innerHTML = `<span class="dot"></span>` +
+      (t.paused ? `reading text · ${t.left} waiting for the import` : `reading text · ${t.left} left`);
   } catch (e) {}
 }
 
@@ -1350,14 +1773,19 @@ async function pollHotFolder() {
   try {
     const d = await (await fetch("/api/hotfolder")).json();
     $("#hf-chip").classList.toggle("on", !!d.watching);
-    $("#hf-start-btn").style.display = d.watching ? "none" : "";
-    $("#hf-stop-btn").style.display = d.watching ? "" : "none";
+    $("#watch-banner").hidden = !d.watching;
+    const was = state.watchRunId;
+    state.watchRunId = d.watching ? d.run_id : null;
+    if (was !== state.watchRunId) refreshRuns(state.runId);
+    updateStartButton();
     if (!d.watching) { $("#hf-text").textContent = "watching"; $("#hf-status").textContent = ""; return; }
+    $("#watch-banner-path").textContent = d.folder || "";
     const name = (d.folder || "").split("/").pop() || d.folder || "folder";
     $("#hf-chip").title = `Watching ${d.folder || name} — new photos are ingested automatically`;
     $("#hf-text").textContent = `watching ${name}`;
-    const bits = [`${d.n_ingested || 0} ingested`];
-    if (d.n_pending) bits.push(`${d.n_pending} arriving`);
+    const bits = [`${d.n_ingested || 0} photo${d.n_ingested === 1 ? "" : "s"} added so far`];
+    if (d.n_pending) bits.push(`${d.n_pending} arriving` +
+                               (d.n_waiting_data ? ` (${d.n_waiting_data} still uploading)` : ""));
     if (d.n_unusable) bits.push(`${d.n_unusable} unreadable`);
     if (d.last_error) bits.push(`last error: ${d.last_error}`);
     $("#hf-status").textContent = bits.join(" · ");
@@ -1365,12 +1793,94 @@ async function pollHotFolder() {
 }
 
 // ---- upload / ingest ----
+function runSource() {
+  const r = document.querySelector("input[name=run-source]:checked");
+  return r ? r.value : "local";
+}
+function updateStartButton() {
+  const host = runSource() === "host";
+  const ready = host ? !!$("#hf-path-input").value.trim() : !!($("#folder-input").files || []).length;
+  const btn = $("#ingest-btn");
+  btn.disabled = !ready;
+  btn.textContent = host && $("#host-watch").checked
+    ? (state.watchRunId ? "Start run & watch (replaces the current watch)" : "Start run & watch")
+    : "Start run";
+}
+
+// ---- host folder browser (folders on the Spark, not this device) ----
+let hostDialogPick = null, hostDialogPath = "";
+async function hostDialogGo(path) {
+  const note = $("#hd-note");
+  note.textContent = "Loading…";
+  try {
+    const res = await fetch("/api/host/browse?path=" + encodeURIComponent(path || ""));
+    const d = await res.json();
+    if (!res.ok) {
+      if (path) {                      // typed/stale path: fall back to the host locations
+        await hostDialogGo("");
+        $("#hd-note").textContent = `Couldn’t open ${path} — ${d.error || "not available"}. Pick a location below.`;
+        return;
+      }
+      throw new Error(d.error || "Can't open that folder.");
+    }
+    hostDialogPath = d.path;
+    $("#hd-path").textContent = d.path || "Host locations";
+    $("#hd-up").disabled = !d.parent;
+    $("#hd-up").dataset.path = d.parent || "";
+    $("#hd-use").disabled = !d.path;
+    $("#hd-mkdir").disabled = !d.path || d.writable === false;
+    $("#hd-mkdir").title = d.writable === false ? "This host folder is read-only" : "Create a folder here";
+    $("#hd-mkdir-row").hidden = true;
+    $("#hd-list").innerHTML = d.dirs.length
+      ? d.dirs.map(x => `<button type="button" data-path="${esc(x.path)}">📁 ${esc(x.name)}</button>`).join("")
+      : `<div style="padding:10px;color:var(--text-dim)">No subfolders</div>`;
+    $$("#hd-list button").forEach(b => b.addEventListener("click", () => hostDialogGo(b.dataset.path)));
+    note.textContent = d.path ? `${d.n_images} photo${d.n_images === 1 ? "" : "s"} here` +
+      (d.dirs.length ? ` · ${d.dirs.length} subfolder${d.dirs.length === 1 ? "" : "s"} (runs include subfolders)` : "") +
+      (d.writable === false ? " · read-only" : "") : "";
+  } catch (e) { note.textContent = e.message; }
+}
+function openHostDialog(title, start, onPick) {
+  hostDialogPick = onPick;
+  $("#hd-title").textContent = title;
+  $("#host-dialog").showModal();
+  hostDialogGo(start);
+}
+function initHostDialog() {
+  $("#hd-up").addEventListener("click", () => hostDialogGo($("#hd-up").dataset.path));
+  $("#hd-roots").addEventListener("click", () => hostDialogGo(""));
+  $("#hd-cancel").addEventListener("click", () => $("#host-dialog").close());
+  $("#hd-mkdir").addEventListener("click", () => {
+    $("#hd-mkdir-row").hidden = false; $("#hd-mkdir-name").value = ""; $("#hd-mkdir-name").focus();
+  });
+  $("#hd-mkdir-cancel").addEventListener("click", () => { $("#hd-mkdir-row").hidden = true; });
+  const mkdir = async () => {
+    const name = $("#hd-mkdir-name").value.trim();
+    if (!name) return;
+    const res = await fetch("/api/host/mkdir", { method: "POST", headers: { "Content-Type": "application/json" },
+                                                 body: JSON.stringify({ parent: hostDialogPath, name }) });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) { $("#hd-note").textContent = d.error || "Couldn’t create the folder."; return; }
+    await hostDialogGo(d.path);              // open the new folder, ready to use
+    $("#hd-note").textContent = `Created ${d.path}`;
+  };
+  $("#hd-mkdir-ok").addEventListener("click", mkdir);
+  $("#hd-mkdir-name").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); mkdir(); } });
+  $("#hd-use").addEventListener("click", async () => {
+    const pick = hostDialogPick, path = hostDialogPath;
+    if (!pick || !path) return;
+    const err = await pick(path);
+    if (err) { $("#hd-note").textContent = err; return; }
+    $("#host-dialog").close();
+  });
+}
+
 function resetUploadForm() {
   $("#run-name-input").value = "";
   $("#folder-input").value = "";          // clears the selected FileList
   const sel = $("#upload-selection");
-  sel.textContent = "No folder selected"; sel.className = "";
-  $("#ingest-btn").disabled = true;       // re-enabled when a new folder is picked
+  sel.textContent = "No folder chosen"; sel.className = "";
+  updateStartButton();
 }
 let ingestPoll = null;
 function setProgress(pct, msg, isError) {
@@ -1534,8 +2044,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     const btn = e.target, label = btn.textContent;
     if (state.selectMode) {
       const paths = [...state.selected];
-      if (exportTarget !== "browser") exportMany(paths, btn, label, $("#ab-note"));
+      if (exportTarget === "server") exportServer({ paths }, btn, label, $("#ab-note"));
+      else if (exportTarget !== "browser") exportMany(paths, btn, label, $("#ab-note"));
       else downloadMany({ paths }, btn);
+    } else if (exportTarget === "server") {
+      exportServer({ scope: "starred" }, btn, label, $("#ab-note"));
     } else if (exportTarget !== "browser") {
       exportMany(starredPathsForOwner(), btn, label, $("#ab-note"));
     } else {
@@ -1585,6 +2098,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   $("#modal-prev").addEventListener("click", () => step(-1));
   $("#modal-next").addEventListener("click", () => step(1));
+  $("#modal-img").addEventListener("load", drawOcr);
+  window.addEventListener("resize", drawOcr);
   document.addEventListener("keydown", e => {
     if (!$("#settings-panel").hidden) {
       if (e.key === "Escape") closeSettings();
@@ -1602,6 +2117,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         e.preventDefault();
         downloadOne(state.openFrame.path, null);
       }
+      else if (e.key === "t" || e.key === "T") { e.preventDefault(); toggleAllText(); }
       return;
     }
     // Grid zoom. Skipped while typing, and while a modifier is held so the
@@ -1618,6 +2134,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#btn-upload").addEventListener("click", () => {
     const p = $("#upload-panel");
     p.style.display = p.style.display === "block" ? "none" : "block";
+    if (p.style.display === "block") pollHotFolder();     // fresh watch status, not up to 5 s old
   });
   $("#upload-cancel").addEventListener("click", () => { $("#upload-panel").style.display = "none"; });
   $("#ab-cancel").addEventListener("click", async () => {
@@ -1630,14 +2147,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#folder-input").addEventListener("change", () => {
     const files = Array.from($("#folder-input").files);
     const sel = $("#upload-selection");
-    if (!files.length) { sel.textContent = "No folder selected"; sel.className = ""; $("#ingest-btn").disabled = true; return; }
+    if (!files.length) { sel.textContent = "No folder chosen"; sel.className = ""; updateStartButton(); return; }
     const folder = files[0].webkitRelativePath ? files[0].webkitRelativePath.split("/")[0] : "folder";
     sel.textContent = `${folder} (${files.length} files)`; sel.className = "ready";
-    $("#ingest-btn").disabled = false;
+    updateStartButton();
     if (!$("#run-name-input").value) $("#run-name-input").value = folder;
   });
   const UPLOAD_BATCH = 200;  // files per request → bounds open FDs on the server
-  $("#ingest-btn").addEventListener("click", async () => {
+  async function startLocalRun() {
     const files = Array.from($("#folder-input").files);
     if (!files.length) return;
     $("#ingest-btn").disabled = true;
@@ -1688,34 +2205,62 @@ document.addEventListener("DOMContentLoaded", async () => {
       state.activity = null; updateActivityBar();
       $("#ingest-btn").disabled = false;
     }
-  });
+  }
 
-  // hot folder controls
-  $("#hf-start-btn").addEventListener("click", async () => {
+  // Host folder: watch it (live event) or ingest it once.
+  async function startHostRun() {
     const path = $("#hf-path-input").value.trim();
-    if (!path) { setProgress(0, "Enter a folder to watch.", true); return; }
-    $("#hf-start-btn").disabled = true;
+    if (!path) { setProgress(0, "Choose a host folder.", true); return; }
+    const watch = $("#host-watch").checked;
+    const name = $("#run-name-input").value.trim();
+    $("#ingest-btn").disabled = true;
     try {
-      const res = await fetch("/api/hotfolder/start", {
+      const res = await fetch(watch ? "/api/hotfolder/start" : "/api/ingest/host", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path, name: $("#run-name-input").value.trim() }),
+        body: JSON.stringify({ path, name }),
       });
       // A missing route returns HTML, so res.json() throws — don't let that
-      // become a silent no-op the way it did before.
+      // become a silent no-op.
       const d = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setProgress(0, d.error || `Could not start watching (HTTP ${res.status})`, true);
-        return;
+      if (!res.ok) { setProgress(0, d.error || `Could not start the run (HTTP ${res.status})`, true); return; }
+      const label = name || path.split("/").filter(Boolean).pop();
+      if (watch) {
+        $("#progress-wrap").style.display = "none";
+        $("#upload-panel").style.display = "none";
+        showToast(`Watching ${path} — “${label}” is selected and fills in as photos are processed.` +
+                  (d.auto_export ? " Auto Export is on." : ""));
+        state.watchRunId = d.run_id;
+        await refreshRuns(d.run_id);
+        await selectRun(d.run_id);          // this viewer follows the live shoot
+        await pollHotFolder();
+      } else {
+        beginActivity("Processing host folder…", label);
+        setProgress(2, "Processing the host folder…");
+        pollIngest(d.run_id);
       }
-      beginActivity("Watching — first batch starting…", path.split("/").pop());
-      setProgress(2, "Watching — the first batch is being processed…");
-      await refreshRuns(d.run_id);
-      await selectRun(d.run_id);          // this viewer follows the live shoot
-      await pollHotFolder();
+      $("#run-name-input").value = "";
     } catch (e) {
-      setProgress(0, "Could not start watching: " + (e.message || e), true);
-    } finally { $("#hf-start-btn").disabled = false; }
-  });
+      setProgress(0, "Could not start the run: " + (e.message || e), true);
+    } finally { updateStartButton(); }
+  }
+
+  $$("input[name=run-source]").forEach(r => r.addEventListener("change", () => {
+    const host = runSource() === "host";
+    $$(".src-host").forEach(el => { el.hidden = !host; });
+    $$(".src-local").forEach(el => { el.hidden = host; });
+    updateStartButton();
+  }));
+  $("#hf-path-input").addEventListener("input", updateStartButton);
+  $("#host-watch").addEventListener("change", updateStartButton);
+  $("#ingest-btn").addEventListener("click", () => runSource() === "host" ? startHostRun() : startLocalRun());
+  $("#host-browse-btn").addEventListener("click", () =>
+    openHostDialog("Choose the host folder with the photos", $("#hf-path-input").value.trim(), p => {
+      $("#hf-path-input").value = p;
+      if (!$("#run-name-input").value) $("#run-name-input").value = p.split("/").filter(Boolean).pop() || "";
+      updateStartButton();
+    }));
+
+  // hot folder controls
   $("#hf-stop-btn").addEventListener("click", async () => {
     await fetch("/api/hotfolder/stop", { method: "POST" });
     await pollHotFolder();
@@ -1760,6 +2305,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   setInterval(pollStars, 3000);
   pollHotFolder();
   setInterval(pollHotFolder, 5000);
+  initAuto();
+  initHostDialog();
+  pollAuto();
+  setInterval(pollAuto, 5000);
 });
 </script>
 </body>

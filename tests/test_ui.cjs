@@ -136,6 +136,25 @@ test('individual downloads honor the selected local destination', async () => {
   assert.match(url, /run_id=7/);
 });
 
+test('server destination exports on the server and never downloads through the browser', async () => {
+  const {ctx,run} = exportBrowser({});
+  ctx.setTimeout = fn => { fn(); return 0; };   // the job poll waits between checks
+  run('exportTarget="server"; serverExport={enabled:true,name:"exports"}; state.runId=7; state.starOwner="mine"');
+  const calls = [];
+  ctx.fetch = async (u, opts) => {
+    calls.push([u, opts && JSON.parse(opts.body)]);
+    if (u === '/api/export/server') return {ok:true, json:async()=>({job:'j1', total:1, dest:'exports/shoot'})};
+    if (u === '/api/export/server/j1') return {ok:true, json:async()=>({done:true, done_count:1, total:1, dest:'exports/shoot',
+      missing:0, error:'', result:{written:1, skipped:0, failed:0, total:1, last_error:''}})};
+    assert.fail('unexpected fetch ' + u);
+  };
+  await ctx.downloadOne('/photos/frame.jpg', null);
+  assert.deepEqual(calls[0][1].paths, ['/photos/frame.jpg']);
+  assert.equal(calls[0][1].run_id, 7);
+  assert.equal(calls.length, 2);
+  assert.equal(run('exportBusy'), false);
+});
+
 test('local folder picker cancellation does not write or change destinations', async () => {
   const {ctx,run}=exportBrowser({showDirectoryPicker:async()=>{throw Object.assign(new Error('cancel'),{name:'AbortError'});}});
   run('exportTarget="local"');

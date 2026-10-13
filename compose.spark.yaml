@@ -14,6 +14,8 @@ services:
       - "${SPARK_BIND_IP:-0.0.0.0}:${SPARK_PORT:-8600}:8600"
     environment:
       IMAGE_FILTERER_PASSWORD: ${IMAGE_FILTERER_PASSWORD:-}
+      # Server-side export is enabled only when EXPORT_PATH is set.
+      IMAGE_FILTERER_EXPORT_DIR: ${EXPORT_PATH:+/exports}
     volumes:
       - type: bind
         source: ${SPARK_DATA_DIR:?Set SPARK_DATA_DIR in .env.spark}
@@ -24,6 +26,13 @@ services:
         source: ${PHOTO_SOURCE_PATH:-./deploy/spark/empty-photo-source}
         target: /photos
         read_only: true
+        bind:
+          create_host_path: false
+      # Writable, unlike /photos: picks exported from the viewer land here
+      # (e.g. an exports/ folder on the same LucidLink share).
+      - type: bind
+        source: ${EXPORT_PATH:-./deploy/spark/empty-export}
+        target: /exports
         bind:
           create_host_path: false
     deploy:

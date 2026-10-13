@@ -104,6 +104,37 @@ def list_images(root: Path) -> List[Path]:
     return sorted(p for p in root.iterdir() if p.suffix.lower() in IMAGE_EXTS and p.is_file())
 
 
+def _walk_photo_files(root: Path):
+    """Every file under ``root``, skipping hidden entries and any folder holding
+    the export marker — exported copies must never come back as new photos."""
+    import os
+    from .export import EXPORT_MARKER
+    for dirpath, dirs, files in os.walk(root):
+        if EXPORT_MARKER in files:
+            dirs[:] = []
+            continue
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for f in files:
+            if not f.startswith("."):
+                yield Path(dirpath) / f
+
+
+def list_photo_files(root: Path, *, candidates=None) -> List[Path]:
+    """Every supported image under ``root`` (or among ``candidates``), RAW and
+    JPEG twins both included — what to mirror, not what to rank."""
+    entries = _walk_photo_files(root) if candidates is None else candidates
+    return sorted(p for p in entries if p.suffix.lower() in IMAGE_EXTS and p.is_file())
+
+
+def raw_twins(files) -> Dict[str, str]:
+    """{jpeg path: raw path} for every JPEG with a same-name RAW beside it. The
+    JPEG is what's ranked (fast, never shown twice); the RAW is what's handed out."""
+    from .imaging import is_raw
+    raws = {(p.parent, p.stem.lower()): p for p in files if is_raw(p)}
+    return {str(p): str(raws[(p.parent, p.stem.lower())]) for p in files
+            if not is_raw(p) and (p.parent, p.stem.lower()) in raws}
+
+
 def scan_images(root: Path, *, candidates=None) -> List[Path]:
     """Images anywhere under ``root`` (recursive).
 
@@ -115,10 +146,9 @@ def scan_images(root: Path, *, candidates=None) -> List[Path]:
     """
     from .imaging import is_raw
 
-    entries = root.rglob("*") if candidates is None else candidates
-    found = sorted(p for p in entries if p.suffix.lower() in IMAGE_EXTS and p.is_file())
-    non_raw_stems = {(p.parent, p.stem) for p in found if not is_raw(p)}
-    return [p for p in found if not (is_raw(p) and (p.parent, p.stem) in non_raw_stems)]
+    found = list_photo_files(root, candidates=candidates)
+    non_raw_stems = {(p.parent, p.stem.lower()) for p in found if not is_raw(p)}
+    return [p for p in found if not (is_raw(p) and (p.parent, p.stem.lower()) in non_raw_stems)]
 
 
 def attach_burst_columns(
@@ -141,6 +171,9 @@ def attach_burst_columns(
         long_gap_seconds=cfg.bursts.long_gap_seconds,
         similarity_threshold=cfg.bursts.similarity_threshold,
         gap_seconds_fallback=cfg.bursts.gap_seconds,
+        lookback=cfg.bursts.lookback,
+        max_span_seconds=cfg.bursts.max_span_seconds,
+        anchor_threshold=cfg.bursts.anchor_threshold,
     )
     df = df.copy()
     df["burst_id"] = [burst_map[Path(p)] for p in df["path"]]

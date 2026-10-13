@@ -11,9 +11,10 @@ prefixes because the user's filename conventions may not be stable going forward
     step below splits their bursts whenever their frames diverge visually.
   - Other / unknown bodies fall back to ``Make/Model``.
 
-Within a single camera id, two consecutive frames belong to the same burst when:
-    dt ≤ short_gap_seconds                                          (always merge)
-    OR (dt ≤ long_gap_seconds AND cosine_sim ≥ similarity_threshold)
+Within a single camera id a frame joins the current burst ("moment") when it's
+within short_gap_seconds of the previous frame, or within long_gap_seconds and
+similar to the moment's recent frames and to its first frame (see
+:func:`cluster_bursts`).
 
 When no embedding is provided, falls back to the old time-only rule with
 ``gap_seconds``.
@@ -99,7 +100,27 @@ def _raw_exif(path: Path) -> Dict[str, object]:
     return out
 
 
+_NO_META = object()
+
+
 def read_frame_meta(path: Path) -> Optional[FrameMeta]:
+    """Capture time and camera from EXIF. Memoized in the process-wide cache
+    by (path, size, mtime): every ingest of a live run re-reads all of them."""
+    from .cache_io import MEMORY
+    try:
+        st = Path(path).stat()
+        key = ("frame_meta", str(path), st.st_size, st.st_mtime_ns)
+    except OSError:
+        return _read_frame_meta(path)
+    hit = MEMORY.get(key)
+    if hit is not None:
+        return None if hit is _NO_META else FrameMeta(path=path, camera_id=hit.camera_id, captured_at=hit.captured_at)
+    meta = _read_frame_meta(path)
+    MEMORY.put(key, _NO_META if meta is None else meta, 600)
+    return meta
+
+
+def _read_frame_meta(path: Path) -> Optional[FrameMeta]:
     try:
         from .imaging import is_raw
         if is_raw(path):
@@ -137,12 +158,21 @@ def cluster_bursts(
     *,
     embeddings: Optional[Dict[Path, np.ndarray]] = None,
     short_gap_seconds: float = 0.6,
-    long_gap_seconds: float = 8.0,
-    similarity_threshold: float = 0.92,
+    long_gap_seconds: float = 30.0,
+    similarity_threshold: float = 0.91,
     gap_seconds_fallback: float = 2.5,
+    lookback: int = 3,
+    max_span_seconds: float = 45.0,
+    anchor_threshold: float = 0.89,
 ) -> List[List[FrameMeta]]:
-    """Camera-strict, time + (optional) embedding-similarity aware burst clustering.
+    """Camera-strict, time + embedding-similarity aware burst ("moment") clustering.
 
+    Within one camera, in time order, a frame joins the current moment when
+      dt <= short_gap_seconds                                     (always), or
+      dt <= long_gap_seconds and the moment is <= max_span_seconds long and
+           the frame is similar (>= similarity_threshold) to any of the
+           moment's last ``lookback`` frames and (>= anchor_threshold) to its
+           first frame.
     If ``embeddings`` is None, falls back to time-only with ``gap_seconds_fallback``.
     """
     if not metas:
@@ -150,6 +180,9 @@ def cluster_bursts(
     ordered = sorted(metas, key=lambda m: (m.camera_id, m.captured_at))
     clusters: List[List[FrameMeta]] = []
     current: List[FrameMeta] = [ordered[0]]
+
+    def emb(m):
+        return embeddings.get(m.path) if embeddings is not None else None
 
     for m in ordered[1:]:
         prev = current[-1]
@@ -159,19 +192,20 @@ def cluster_bursts(
             continue
 
         dt = (m.captured_at - prev.captured_at).total_seconds()
+        span = (m.captured_at - current[0].captured_at).total_seconds()
         if embeddings is None:
             same_burst = dt <= gap_seconds_fallback
         elif dt <= short_gap_seconds:
             same_burst = True
-        elif dt <= long_gap_seconds:
-            a = embeddings.get(prev.path)
-            b = embeddings.get(m.path)
-            if a is None or b is None:
-                # Missing embedding: be conservative — fall back to short-gap rule.
-                same_burst = dt <= short_gap_seconds
+        elif dt <= long_gap_seconds and span <= max_span_seconds:
+            a = emb(m)
+            recent = [emb(x) for x in current[-lookback:]]
+            first = emb(current[0])
+            if a is None or any(r is None for r in recent) or first is None:
+                same_burst = False            # missing embedding: be conservative
             else:
-                sim = _cosine(a, b)
-                same_burst = sim >= similarity_threshold
+                same_burst = (max(_cosine(a, r) for r in recent) >= similarity_threshold
+                              and _cosine(a, first) >= anchor_threshold)
         else:
             same_burst = False
 
@@ -190,9 +224,12 @@ def assign_burst_ids(
     *,
     embeddings: Optional[Dict[Path, np.ndarray]] = None,
     short_gap_seconds: float = 0.6,
-    long_gap_seconds: float = 8.0,
-    similarity_threshold: float = 0.92,
+    long_gap_seconds: float = 30.0,
+    similarity_threshold: float = 0.91,
     gap_seconds_fallback: float = 2.5,
+    lookback: int = 3,
+    max_span_seconds: float = 45.0,
+    anchor_threshold: float = 0.89,
 ) -> Dict[Path, int]:
     metas: List[FrameMeta] = []
     no_exif: List[Path] = []
@@ -209,6 +246,9 @@ def assign_burst_ids(
         long_gap_seconds=long_gap_seconds,
         similarity_threshold=similarity_threshold,
         gap_seconds_fallback=gap_seconds_fallback,
+        lookback=lookback,
+        max_span_seconds=max_span_seconds,
+        anchor_threshold=anchor_threshold,
     )
     out: Dict[Path, int] = {}
     bid = 0

@@ -8,6 +8,12 @@ shopt -s nullglob
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
+# Keep native state and downloaded models in this checkout unless explicitly overridden.
+export IMAGE_FILTERER_DATA_ROOT="${IMAGE_FILTERER_DATA_ROOT:-$PWD/data}"
+export HF_HOME="${HF_HOME:-$IMAGE_FILTERER_DATA_ROOT/huggingface}"
+export YOLO_CONFIG_DIR="${YOLO_CONFIG_DIR:-$IMAGE_FILTERER_DATA_ROOT/ultralytics}"
+mkdir -p "$IMAGE_FILTERER_DATA_ROOT" "$HF_HOME" "$YOLO_CONFIG_DIR/Ultralytics"
+
 pause_on_exit() {
   echo
   read -r -p "Press Enter to close this window."
@@ -22,11 +28,11 @@ echo
 # PATH, look for the installed binary directly in the usual places.
 find_binary() {
   local name="$1"
-  if command -v "$name" >/dev/null 2>&1; then
-    command -v "$name"; return 0
-  fi
   if [ -x "./.venv/bin/$name" ]; then
     echo "./.venv/bin/$name"; return 0
+  fi
+  if command -v "$name" >/dev/null 2>&1; then
+    command -v "$name"; return 0
   fi
   local base envdir
   for base in "$HOME/miniconda3" "$HOME/anaconda3" "$HOME/miniforge3"; do

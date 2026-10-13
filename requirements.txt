@@ -11,6 +11,7 @@ pillow>=10.0
 flask>=3.0
 opencv-python>=4.9
 open_clip_torch>=2.24
+transformers>=4.40
 mediapipe>=0.10
 ultralytics>=8.2
 tqdm>=4.65
@@ -21,3 +22,11 @@ rawpy>=0.18
 # frame silently becomes its own single-frame burst. It also supplies the Sony
 # lens model that PIL won't surface.
 pyexiv2>=2.8
+
+# Text on screen (OCR) — the [ocr] extra in pyproject.toml. CUDA 13 GPU only;
+# leave these out elsewhere and the app simply reports OCR as unavailable.
+rapidocr>=3.9,<3.10
+onnxruntime>=1.18
+tensorrt-cu13>=10
+cuda-python>=13
+rapidfuzz>=3

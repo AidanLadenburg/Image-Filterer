@@ -1,15 +1,25 @@
 {
-  "mean_cv_auc": 0.9346397256470513,
-  "auc_holdout": 0.9594671201814059,
-  "auc_in_train": 0.9802361032331254,
-  "auc_all_in_sample": 0.978516333938294,
-  "inner_auc_per_fold": [
-    0.9088172804532578,
-    0.9265226628895185,
-    0.9487429178470255,
-    0.9569424715909091,
-    0.9321732954545454
+  "events": [
+    "/home/nvhqphoto/Desktop/Aidan-JHH-Selection-POC-May"
   ],
-  "n_train": 2083,
-  "n_holdout": 521
+  "n_train": 2360,
+  "n_keepers": 295,
+  "n_rejects": 2065,
+  "left_out_one_label_photographer_days": 268,
+  "held_out": {
+    "leave_one_photographer_out": {
+      "photographers": 4,
+      "ap": 0.7620624918777927,
+      "keepers_in_top10pct": 0.8958333333333334,
+      "best_frame_picked": 0.7466666666666667
+    },
+    "timeline_slices": {
+      "ap": 0.6708873285741216,
+      "keepers_in_top10pct": 0.8292682926829268,
+      "best_frame_picked": 0.8024691358024691,
+      "n_mixed_bursts": 81,
+      "must_find_in_top10pct": 3,
+      "must_find_total": 9
+    }
+  }
 }

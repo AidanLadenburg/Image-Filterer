@@ -17,6 +17,7 @@ import hmac
 import io
 import json
 import mimetypes
+import os
 import re
 import secrets
 import shutil
@@ -42,11 +43,18 @@ from flask import Flask, Response, abort, jsonify, request, send_file, session
 
 from PIL import Image
 
-from .config import Config, default_config
+from .config import IMAGE_EXTS, Config, default_config
 from .db import RunDB
+from .auto_export import (CATEGORIES as AUTO_CATEGORIES, STARRED as AUTO_STARRED, AutoExporter,
+                          AutoExportSettings, RunData as AutoRunData,
+                          load_settings as load_auto_settings, save_settings as save_auto_settings)
+from .export import (ensure_export_root, export_files, export_overlaps_source, mark_export_dir,
+                     source_root)
 from .ingest import ingest_folder
+from .ocr import OcrService
 from .pipeline import output_dir, read_version
 from .stars import StarStore
+from .textmatch import match_scores as text_match_scores, snippet as text_snippet
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 
@@ -109,6 +117,16 @@ class LoadedRun:
     shot_types: Optional[np.ndarray] = None
     captured: Optional[np.ndarray] = None
     scores_sorted: Optional[np.ndarray] = None   # for the quality percentile
+    # RAW+JPEG pairs: ranked JPEG path → its RAW. Every "original" handed out
+    # (download, zip, export, auto-export) is the RAW.
+    raw_of: Dict[str, str] = field(default_factory=dict)
+    # Handed to a viewer's request at least once. Only such generations are
+    # kept after being superseded: a page may still be showing them.
+    served: bool = False
+
+    def original(self, path: str) -> str:
+        raw = self.raw_of.get(str(path))
+        return raw if raw and Path(raw).is_file() else str(path)
     # RLock, not Lock: writers (api_star) hold this while calling read helpers
     # like _star_flags that also acquire it, to build a consistent response
     # from the same critical section — a plain Lock would deadlock there.
@@ -220,6 +238,28 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
     runs_cache: "OrderedDict[int, LoadedRun]" = OrderedDict()
     runs_lock = threading.Lock()
     RUN_CACHE_MAX = 3
+    # Superseded generations still being browsed: run_id → {version: LoadedRun}.
+    # A live watch publishes a new generation every batch; without these, every
+    # click from a page that hadn't reloaded yet was refused as "stale" (the
+    # viewer flashed open and shut until the user accepted the new photos).
+    # Kept while anyone still uses them: dropped only after OLD_VERSION_IDLE s
+    # untouched (memory grows with viewers who haven't reloaded, not with the
+    # number of batches). OLD_VERSIONS_CAP is only a safety net.
+    OLD_VERSION_IDLE = 1800.0
+    OLD_VERSIONS_CAP = 30
+    old_snapshots: Dict[int, "OrderedDict[int, LoadedRun]"] = {}
+    old_touched: Dict[Tuple[int, int], float] = {}
+
+    def _prune_old(run_id: int) -> None:
+        """Caller holds runs_lock."""
+        kept = old_snapshots.get(run_id)
+        if not kept:
+            return
+        now = time.time()
+        for v in [v for v in kept if now - old_touched.get((run_id, v), 0) > OLD_VERSION_IDLE]:
+            kept.pop(v, None); old_touched.pop((run_id, v), None)
+        while len(kept) > OLD_VERSIONS_CAP:
+            v, _ = kept.popitem(last=False); old_touched.pop((run_id, v), None)
     star_stores: Dict[int, StarStore] = {}
     load_locks: Dict[int, threading.RLock] = {}
 
@@ -236,7 +276,54 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         "active_progress": None,         # {run_id, name, progress, message}
         "cancel_event": threading.Event(),
         "hotfolder": None,               # at most one HotFolderWatcher, ever
+        "feature_extractor": None,         # lazy, then hot for this process lifetime
+        "scene_analyzer": None,            # lazy YOLO model, shared by ingests
     }
+
+    def _hot_feature_extractor():
+        """One lazy extractor shared by all serialized server ingests."""
+        extractor = state["feature_extractor"]
+        if extractor is None:
+            from .cache_io import FeatureCache
+            from .features import FeatureExtractor
+            extractor = FeatureExtractor(cfg.features, FeatureCache(cfg.cache_dir))
+            state["feature_extractor"] = extractor
+        return extractor
+
+    def _hot_scene_analyzer():
+        analyzer = state["scene_analyzer"]
+        if analyzer is None:
+            import torch
+            from .cache_io import FeatureCache
+            from .scene import SceneAnalyzer
+            analyzer = SceneAnalyzer(
+                cfg.scene, FeatureCache(cfg.cache_dir),
+                device="0" if torch.cuda.is_available() else None,
+            )
+            state["scene_analyzer"] = analyzer
+        return analyzer
+
+    # ----------------------------- text on screen (OCR)
+    #
+    # Read in the background, by content hash, never while an ingest holds the
+    # GPU. Text isn't part of a run's published generation: it fills in as it's
+    # read, and search/auto-export use whatever is there.
+
+    def _ocr_results(run_ids: Set[int]) -> None:
+        for rid in run_ids:
+            row = db.get(rid)
+            if row and load_auto_settings(cfg.runs_dir / row["folder"]).enabled:
+                _auto_kick(rid)
+
+    ocr = OcrService(cfg.ocr, cfg.cache_dir, cfg.data_root / "models" / "ocr",
+                     is_busy=lambda: state["ingest_lock"].locked(), on_results=_ocr_results)
+    app.extensions["image_filterer_ocr"] = ocr
+
+    def _ocr_kick(run_id: int) -> None:
+        """Fresh photos of this run go to the front of the OCR queue."""
+        rn = get_run(run_id)
+        if rn is not None:
+            ocr.submit(run_id, rn.ranked["path"].astype(str), urgent=True)
 
     # ----------------------------- stars
     #
@@ -326,9 +413,14 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
                 bursts = pd.read_csv(outputs / "bursts.csv")
             except Exception:  # noqa: BLE001 — mid-rename; retry
                 continue
+            raw_of = {}
+            if "raw_path" in ranked.columns:
+                raw_of = {str(p): str(r) for p, r in zip(ranked["path"], ranked["raw_path"])
+                          if isinstance(r, str) and r}
             rn = LoadedRun(run_id=run_id, run_dir=run_dir, ranked=ranked, bursts=bursts,
                            version=version, star_store=star_stores[run_id],
-                           allowed_paths={str(Path(p).resolve()) for p in ranked["path"]})
+                           allowed_paths={str(Path(p).resolve()) for p in [*ranked["path"], *raw_of.values()]},
+                           raw_of=raw_of)
             npy = outputs / "search_index.npy"
             if npy.exists():
                 try:
@@ -372,11 +464,21 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
             fresh = _read_run(run_id)
             if fresh is None:
                 return previous
+            ocr.submit(run_id, fresh.ranked["path"].astype(str))   # no-op for what's already read
             with runs_lock:
+                # Keep the superseded generation only if a viewer was shown it.
+                # A live watch publishes one per batch; keeping every one for
+                # OLD_VERSION_IDLE held ~30 full copies of a 10k-photo run
+                # (several GB) that no page had ever displayed.
+                if previous is not None and previous.version != fresh.version and previous.served:
+                    old_snapshots.setdefault(run_id, OrderedDict())[previous.version] = previous
+                    old_touched[(run_id, previous.version)] = time.time()
+                    _prune_old(run_id)
                 runs_cache[run_id] = fresh
                 runs_cache.move_to_end(run_id)
                 while len(runs_cache) > RUN_CACHE_MAX:
-                    runs_cache.popitem(last=False)
+                    evicted, _ = runs_cache.popitem(last=False)
+                    old_snapshots.pop(evicted, None)
             return fresh
 
     def _default_run_id() -> Optional[int]:
@@ -395,16 +497,68 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
             run_id = int(raw) if raw not in (None, "") else None
         except (TypeError, ValueError):
             abort(400, description="Invalid run_id")
-        return get_run(run_id if run_id is not None else _default_run_id())
+        rn = get_run(run_id if run_id is not None else _default_run_id())
+        # A page still showing an earlier generation keeps getting THAT
+        # generation (consistent burst ids and paging) until it chooses to
+        # reload — as long as it's one of the last few. Older → "stale".
+        seen = request.args.get("version")
+        if rn is not None and seen and str(seen).isdigit() and int(seen) != rn.version:
+            with runs_lock:
+                _prune_old(rn.run_id)
+                old = old_snapshots.get(rn.run_id, {}).get(int(seen))
+                if old is not None:
+                    old_touched[(rn.run_id, int(seen))] = time.time()
+            if old is not None:
+                return old
+        if rn is not None:
+            rn.served = True
+        return rn
+
+    _text_encoder_lock = threading.Lock()
 
     def _get_text_encoder(ctx: str):
         te = state["text_encoder"]
         if te is not None and getattr(te, "name", None) == ctx.strip().lower():
             return te
-        from .encoders import build_text_encoder
-        te = build_text_encoder(ctx)
-        state["text_encoder"] = te
-        return te
+        # Locked: loading takes ~12 s, and two first searches (or a search and
+        # the start-up warm-up) must not load it twice.
+        with _text_encoder_lock:
+            te = state["text_encoder"]
+            if te is not None and getattr(te, "name", None) == ctx.strip().lower():
+                return te
+            from .encoders import build_text_encoder
+            te = build_text_encoder(ctx)
+            state["text_encoder"] = te
+            return te
+
+    def _warm_up() -> None:
+        """Load the search text model in the background at start-up: it takes
+        ~12 s, so otherwise the first search after every restart paid for it
+        (later searches take ~16 ms). Auto-export's shot list shares it."""
+        from .encoders import context_encoder_has_text_tower
+        ctx = cfg.features.context_encoder
+        if not context_encoder_has_text_tower(ctx):
+            return
+        try:
+            _get_text_encoder(ctx)
+        except Exception:  # noqa: BLE001 — search will retry (and report) on first use
+            pass
+
+    app.extensions["image_filterer_warm_up"] = _warm_up
+
+    def _close_models() -> None:
+        """Close the face / pose models on exit (MediaPipe otherwise prints
+        tracebacks from its destructors as the interpreter shuts down)."""
+        for key in ("feature_extractor", "scene_analyzer"):
+            m = state.get(key)
+            if m is not None:
+                try:
+                    m.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        ocr.stop()
+
+    app.extensions["image_filterer_close_models"] = _close_models
 
     def _ensure_shot_types(rn: LoadedRun) -> Optional[np.ndarray]:
         if rn.shot_types is not None:
@@ -513,7 +667,9 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
 
     # ----------------------------- ingestion
 
-    def _do_ingest(run_id: int, folder: Path) -> None:
+    def _do_ingest(run_id: int, folder: Path, mirror_from: Optional[Path] = None) -> None:
+        """``mirror_from``: a network folder to copy (once, in parallel) into
+        ``folder`` first — see mirror.py for why."""
         cancel = state["cancel_event"]
 
         row0 = db.get(run_id)
@@ -532,10 +688,26 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
             row = db.get(run_id)
             run_dir = cfg.runs_dir / row["folder"]
             run_dir.mkdir(parents=True, exist_ok=True)  # may not exist for server-path ingest
-            res = ingest_folder(folder, cfg, run_dir, progress_cb=cb)
+            if mirror_from is not None:
+                from .imaging import ordered_map
+                from .mirror import ChannelPicker, mirror_copy
+                from .pipeline import list_photo_files
+                srcs = list_photo_files(mirror_from)      # RAW twins too: they're what's handed out
+                channels = ChannelPicker(mirror_from)       # spread over every mount of the share
+                done = 0
+                for _ in ordered_map(lambda p: mirror_copy(channels.source_for(p),
+                                                           folder / p.relative_to(mirror_from)), srcs):
+                    done += 1
+                    if done % 10 == 0 or done == len(srcs):
+                        cb(0.0, f"Copying from the host folder… {done}/{len(srcs)}")
+            res = ingest_folder(folder, cfg, run_dir, progress_cb=cb,
+                                feature_extractor=_hot_feature_extractor(),
+                                scene_analyzer=_hot_scene_analyzer())
             db.update(run_id, status="ready", progress=100.0,
                       n_images=res["n_images"], n_bursts=res["n_bursts"],
                       message=f"Ready — {res['n_images']} images, {res['n_bursts']} bursts.")
+            _auto_kick(run_id)
+            _ocr_kick(run_id)
         except _Cancelled:
             db.update(run_id, status="error", progress=0.0,
                       message="Cancelled by user.", error="cancelled")
@@ -662,11 +834,15 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
                     fields["status"] = "ingesting"
                 db.update(run_id, **fields)
 
-            res = ingest_folder(Path(hw.folder), cfg, run_dir, progress_cb=cb,
-                                image_paths=hw.ingest_paths())
+            res = ingest_folder(hw.ingest_root, cfg, run_dir, progress_cb=cb,
+                                image_paths=hw.ingest_paths(), prevalidated=hw.prevalidated(),
+                                feature_extractor=_hot_feature_extractor(),
+                                scene_analyzer=_hot_scene_analyzer())
             db.update(run_id, status="ready", progress=100.0,
                       n_images=res["n_images"], n_bursts=res["n_bursts"],
                       message=f"Watching — {res['n_images']} images, {res['n_bursts']} bursts.")
+            _auto_kick(run_id)
+            _ocr_kick(run_id)
             return True
         except _Cancelled:
             hw.stop()
@@ -679,6 +855,28 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
             state["active_ingest"] = None
             state["active_progress"] = None
             state["ingest_lock"].release()
+
+    def _discard_empty_watch_runs() -> None:
+        """Remove watch runs that never received a photo (e.g. a watch started,
+        then replaced, before its first batch). They'd otherwise sit in the
+        registry forever as empty "queued" runs. Only ever called with no watch
+        running, so none of them can still be filling."""
+        for r in db.list():
+            if r["status"] != "queued" or r["n_images"] or state["active_ingest"] == r["id"]:
+                continue
+            if not str(r["message"] or "").startswith("Watching folder"):
+                continue
+            run_dir = cfg.runs_dir / r["folder"]
+            try:
+                if run_dir.resolve().parent == cfg.runs_dir.resolve() and run_dir.is_dir():
+                    shutil.rmtree(run_dir)
+            except OSError:
+                continue
+            db.delete(r["id"])
+            with runs_lock:
+                runs_cache.pop(r["id"], None)
+                old_snapshots.pop(r["id"], None)
+            star_stores.pop(r["id"], None)
 
     @app.route("/api/hotfolder", methods=["GET"])
     def api_hotfolder():
@@ -698,23 +896,35 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         old = state["hotfolder"]
         if old is not None and old.alive:
             old.stop()          # one at a time, so a forgotten watch can't linger
+        _discard_empty_watch_runs()
 
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         name = str(data.get("name", "")).strip() or fp.name or f"Watch {ts}"
         run_id = db.create(name, folder="")
         db.update(run_id, folder=f"run{run_id:04d}_{_safe_name(name)}",
                   status="queued", message="Watching folder…")
+        # A live watch inherits the last-saved auto-export setup (on or off).
+        _apply_auto_defaults(cfg.runs_dir / f"run{run_id:04d}_{_safe_name(name)}")
 
         from .hotfolder import HotFolderWatcher
         def ingest_batch(batch):
             return _hot_ingest(batch, hw)
 
+        from .mirror import is_network_path
+        network = is_network_path(fp)
+        mirror = (cfg.runs_dir / f"run{run_id:04d}_{_safe_name(name)}" / "mirror") if network else None
+        # New photos are decode-checked on first sight (the check is what
+        # proves a file complete; RAW files wait one scan). Network/cloud
+        # folders (Lucid): ingest is cheap once photos are mirrored locally,
+        # so scan and batch more eagerly.
         hw = HotFolderWatcher(fp, run_id, ingest_batch,
-                              scan_interval=float(data.get("scan_interval", 5.0)),
-                              batch_cooldown=float(data.get("cooldown", 20.0)))
+                              scan_interval=float(data.get("scan_interval", 2.0 if network else 5.0)),
+                              batch_cooldown=float(data.get("cooldown", 5.0 if network else 20.0)),
+                              mirror_dir=mirror)
         state["hotfolder"] = hw
         hw.start()
-        return jsonify({"ok": True, "run_id": run_id, "folder": str(fp)})
+        auto_on = load_auto_settings(cfg.runs_dir / f"run{run_id:04d}_{_safe_name(name)}").enabled
+        return jsonify({"ok": True, "run_id": run_id, "folder": str(fp), "auto_export": auto_on})
 
     @app.route("/api/hotfolder/stop", methods=["POST"])
     def api_hotfolder_stop():
@@ -734,9 +944,28 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         never show up here.
         """
         prog = state["active_progress"]
-        if prog is None:
-            return jsonify({"active": None})
-        return jsonify({"active": dict(prog)})
+        st = ocr.status()
+        # Text on screen keeps being read after photos appear; the UI shows a
+        # small "reading text" chip while it is.
+        text = {"left": st["queued"], "paused": st["paused"]} if st["enabled"] and st["queued"] else None
+        return jsonify({"active": dict(prog) if prog is not None else None, "text": text})
+
+    @app.route("/api/ocr/lines")
+    def api_ocr_lines():
+        """The text read on one photo, each line with its box (fractions of
+        the upright photo), and whether it matches the search ``q``."""
+        rn = resolve_run()
+        p = request.args.get("path", "")
+        _check_allowed(p, rn)
+        lines = ocr.lines(p)
+        if lines is None:
+            return jsonify({"read": False, "enabled": ocr.enabled, "lines": []})
+        from .textmatch import line_matches
+        texts = [str(x[0]) for x in lines]
+        hits = line_matches(texts, request.args.get("q", ""))
+        out = [{"text": t, "box": x[2] if len(x) > 2 else [], "match": h}
+               for t, x, h in zip(texts, lines, hits)]
+        return jsonify({"read": True, "enabled": ocr.enabled, "lines": out})
 
     @app.route("/api/cancel_ingest", methods=["POST"])
     def api_cancel_ingest():
@@ -777,7 +1006,8 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
             if row:
                 cur = {"id": row["id"], "name": row["name"],
                        "n_images": row["n_images"], "n_bursts": row["n_bursts"]}
-        return jsonify({"current": cur, "runs": _runs_payload()})
+        return jsonify({"current": cur, "runs": _runs_payload(),
+                        "server_export": _server_export_info()})
 
     @app.route("/api/runs")
     def api_runs():
@@ -869,6 +1099,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
                 db.delete(run_id)
                 with runs_lock:
                     runs_cache.pop(run_id, None)
+                    old_snapshots.pop(run_id, None)
                 star_stores.pop(run_id, None)
             return jsonify({"ok": True, "run_id": run_id, "name": row["name"],
                             "folder_removed": removed})
@@ -1074,6 +1305,8 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
             rn.star_store.set(path, me, want)
             flags = _star_flags(rn, path, me)
             count = len(rn.stars)
+        if want:
+            _auto_kick(rn.run_id)          # Starred/ follows stars promptly
         return jsonify({"ok": True, "path": path, "count": count, **flags})
 
     @app.route("/api/stars/clear", methods=["POST"])
@@ -1159,8 +1392,14 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         rn = resolve_run()
         if rn is None:
             abort(404)
+        moved = False
         if _stale(rn):
-            return jsonify({"stale": True, "version": rn.version, "frames": []}), 409
+            # The page's generation is gone (server restart, long break). Open
+            # the burst that photo belongs to NOW rather than refusing.
+            hit = rn.ranked[rn.ranked["path"].astype(str) == request.args.get("path", "")]
+            if hit.empty:
+                return jsonify({"stale": True, "version": rn.version, "frames": []}), 409
+            burst_id, moved = int(hit["burst_id"].iloc[0]), True
         ranked = rn.ranked
         sub = ranked[ranked["burst_id"] == burst_id].copy()
         if sub.empty:
@@ -1200,7 +1439,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
                 "tech_hard_reject": bool(r.get("tech_hard_reject", False)),
                 "tech_hard_reject_reason": str(r.get("tech_hard_reject_reason", "")),
             })
-        return jsonify({"burst_id": burst_id, "frames": frames,
+        return jsonify({"burst_id": burst_id, "frames": frames, "moved": moved, "version": rn.version,
                         "n_frames_total": n_all, "n_frames_hidden": n_all - len(frames)})
 
     @app.route("/api/search")
@@ -1232,14 +1471,22 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
 
         work = _filtered_frames(rn)
         work["_sim"] = (rn.emb @ qvec)[work.index]
+        # Text on screen: a frame whose slide/screen says the query goes first
+        # (best text match, then best visual match); everything else follows
+        # in visual order, exactly as before.
+        texts = ocr.texts(list(ranked["path"].astype(str)))
+        n_read = sum(t is not None for t in texts)
+        txt = text_match_scores(texts, q) if n_read else np.zeros(len(ranked), dtype=np.float32)
+        work["_txt"] = txt[work.index]
+        work["_key"] = (work["_txt"] > 0) * 1000.0 + work["_txt"] * 10.0 + work["_sim"]
         # Normally one hit per burst (its best-matching frame), so a search
         # doesn't return eight near-identical copies of one moment. Unfurled,
         # there's no grouping to collapse into — every frame competes on its
         # own match to the query.
         if unfurl:
-            best = work.sort_values("_sim", ascending=False)
+            best = work.sort_values("_key", ascending=False)
         else:
-            best = work.loc[work.groupby("burst_id")["_sim"].idxmax()].sort_values("_sim", ascending=False)
+            best = work.loc[work.groupby("burst_id")["_key"].idxmax()].sort_values("_key", ascending=False)
 
         star_counts = _starred_counts(rn)
         me = _viewer()
@@ -1270,12 +1517,15 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
                 "score_s1": float(r.get("score_s1", 0.0)),
                 "score_s12_after_hard": float(r.get("score_s12_after_hard", 0.0)),
                 "relevance": float(r["_sim"]),
+                "text_match": text_snippet(texts[int(r.name)] or "", q) if r["_txt"] > 0 else "",
                 "match_within_burst_rank": int(r.get("within_burst_rank", 1)),
                 **star_flags,
                 "n_starred": int(star_flags["starred"]) if unfurl else int(star_counts.get(bid, 0)),
             })
         return jsonify({"bursts": out, "stats": _run_stats(rn), "version": rn.version, "query": q,
-                        "page": {"offset": offset, "limit": limit, "total_matching": total}})
+                        "page": {"offset": offset, "limit": limit, "total_matching": total},
+                        "text": {"matches": int((best["_txt"] > 0).sum()), "read": n_read,
+                                 "total": len(texts), "enabled": ocr.enabled}})
 
     # ----------------------------- image serving
 
@@ -1348,6 +1598,28 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
             out.append(name)
         return out
 
+    def _resolve_selection(rn: LoadedRun, data: Dict[str, object]) -> Tuple[List[str], int]:
+        """``{"scope": "starred", "owner": …}`` or ``{"paths": [...]}`` → the
+        real, allowed original paths, plus how many were listed but missing."""
+        if str(data.get("scope", "")) == "starred":
+            wanted = sorted(_paths_for_owner(rn, _viewer(), str(data.get("owner", "all"))))
+        else:
+            wanted = [str(p) for p in (data.get("paths") or [])]
+
+        known = set(rn.ranked["path"].astype(str))
+        seen: Set[str] = set()
+        paths: List[str] = []
+        missing = 0
+        for p in wanted:
+            if p in seen or p not in known:      # same trust boundary as /img
+                continue
+            seen.add(p)
+            if Path(p).is_file():
+                paths.append(str(_check_allowed(rn.original(p), rn)))
+            else:
+                missing += 1
+        return paths, missing
+
     def _prune_tokens() -> None:
         now = time.time()
         for t in [t for t, v in _dl_tokens.items() if float(v["expires"]) < now]:
@@ -1356,9 +1628,12 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
     @app.route("/download")
     def download_one():
         """One original file, as an attachment. Same allowlist as /img."""
-        real = _check_allowed(request.args.get("path", ""))
+        rn = resolve_run()
+        req = request.args.get("path", "")
+        _check_allowed(req, rn)                       # the ranked frame must be this run's
+        real = _check_allowed(rn.original(req), rn)   # …and hand out its RAW if it has one
         return send_file(str(real), as_attachment=True, download_name=real.name,
-                         mimetype=mimetypes.guess_type(str(real))[0] or "image/jpeg")
+                         mimetype=mimetypes.guess_type(str(real))[0] or "application/octet-stream")
 
     @app.route("/api/download/prepare", methods=["POST"])
     def api_download_prepare():
@@ -1374,23 +1649,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         if rn is None:
             return jsonify({"error": "No run selected."}), 400
         data = request.get_json(silent=True) or {}
-        if str(data.get("scope", "")) == "starred":
-            wanted = sorted(_paths_for_owner(rn, _viewer(), str(data.get("owner", "all"))))
-        else:
-            wanted = [str(p) for p in (data.get("paths") or [])]
-
-        known = set(rn.ranked["path"].astype(str))
-        seen: Set[str] = set()
-        paths: List[str] = []
-        missing = 0
-        for p in wanted:
-            if p in seen or p not in known:      # same trust boundary as /img
-                continue
-            seen.add(p)
-            if Path(p).is_file():
-                paths.append(str(_check_allowed(p, rn)))
-            else:
-                missing += 1
+        paths, missing = _resolve_selection(rn, data)
         if not paths:
             return jsonify({"error": "Nothing available to download."}), 400
 
@@ -1472,6 +1731,362 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         resp.headers["Cache-Control"] = "no-store"
         return resp
 
+    # ----------------------------- host folders
+    #
+    # "Local device" is the viewer's computer; the "host" is the machine this
+    # server runs on (the Spark). Host folders are picked from a browser limited
+    # to a few roots, and the host export folder can be set from the UI — the
+    # IMAGE_FILTERER_EXPORT_DIR environment variable is only the default.
+
+    _HOST_SETTINGS = cfg.data_root / "host_settings.json"
+
+    def _host_settings() -> Dict[str, object]:
+        try:
+            return json.loads(_HOST_SETTINGS.read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def _export_dir() -> Optional[Path]:
+        v = str(_host_settings().get("export_dir") or "").strip()
+        return Path(v) if v else cfg.export_dir
+
+    def _host_roots() -> List[Path]:
+        """Where Browse host… may go. IMAGE_FILTERER_HOST_ROOTS wins; else a
+        machine's own ``host_roots`` list in data/host_settings.json (e.g. to
+        offer only the fast Lucid mount, not its VM fallback); else defaults."""
+        env = os.environ.get("IMAGE_FILTERER_HOST_ROOTS", "").strip()
+        local = _host_settings().get("host_roots")
+        if env:
+            cands = [Path(p) for p in env.split(os.pathsep) if p]
+        elif isinstance(local, list) and local:
+            cands = [Path(str(p)) for p in local]
+        else:
+            cands = [Path.home(), Path("/mnt"), Path("/media"), Path("/photos"), Path("/exports")]
+        out: List[Path] = []
+        for c in cands:
+            try:
+                r = c.expanduser().resolve()
+            except OSError:
+                continue
+            if r.is_dir() and r not in out:
+                out.append(r)
+        return out
+
+    def _under_roots(p: Path) -> bool:
+        return any(p == r or r in p.parents for r in _host_roots())
+
+    @app.route("/api/host/browse")
+    def api_host_browse():
+        """Subfolders of a host folder (within the allowed roots), with how many
+        photos sit directly in each — enough to recognise a card dump."""
+        raw = request.args.get("path", "").strip()
+        roots = _host_roots()
+        if not raw:
+            return jsonify({"path": "", "parent": None, "roots": [str(r) for r in roots],
+                            "dirs": [{"name": str(r), "path": str(r)} for r in roots]})
+        try:
+            p = Path(raw).expanduser().resolve()
+        except OSError:
+            return jsonify({"error": "Not a valid path."}), 400
+        if not p.is_dir() or not _under_roots(p):
+            return jsonify({"error": "That host folder isn't available to browse."}), 400
+        dirs, n_images = [], 0
+        try:
+            with os.scandir(p) as it:
+                for e in sorted(it, key=lambda e: e.name.lower()):
+                    if e.name.startswith("."):
+                        continue
+                    try:
+                        if e.is_dir():
+                            dirs.append({"name": e.name, "path": str(p / e.name)})
+                        elif Path(e.name).suffix.lower() in {x.lower() for x in IMAGE_EXTS}:
+                            n_images += 1
+                    except OSError:
+                        continue
+        except OSError as exc:
+            return jsonify({"error": f"Can't read that folder: {exc.strerror or exc}"}), 400
+        parent = str(p.parent) if p not in roots and _under_roots(p.parent) else ""
+        return jsonify({"path": str(p), "parent": parent, "dirs": dirs[:500], "n_images": n_images,
+                        "writable": os.access(p, os.W_OK), "roots": [str(r) for r in roots]})
+
+    @app.route("/api/host/mkdir", methods=["POST"])
+    def api_host_mkdir():
+        """Create one new folder inside an allowed host folder (e.g. an exports/
+        folder on the Lucid share). A plain name only — no paths, no overwrite."""
+        data = request.get_json(silent=True) or {}
+        name = str(data.get("name", "")).strip()
+        if not name or name in (".", "..") or name.startswith(".") or re.search(r'[/\\\x00-\x1f]', name) \
+                or len(name) > 100:
+            return jsonify({"error": "Use a plain folder name (no slashes, not starting with a dot)."}), 400
+        try:
+            parent = Path(str(data.get("parent", ""))).expanduser().resolve()
+        except OSError:
+            return jsonify({"error": "Not a valid path."}), 400
+        if not parent.is_dir() or not _under_roots(parent):
+            return jsonify({"error": "You can only create folders inside the allowed host locations."}), 400
+        target = parent / name
+        try:
+            target.mkdir()
+        except FileExistsError:
+            return jsonify({"error": f"“{name}” already exists here."}), 409
+        except OSError as exc:
+            return jsonify({"error": f"Can't create a folder here: {exc.strerror or exc}"}), 400
+        return jsonify({"ok": True, "path": str(target)})
+
+    @app.route("/api/host/settings", methods=["GET"])
+    def api_host_settings_get():
+        d = _export_dir()
+        return jsonify({"export_dir": str(d or ""),
+                        "export_dir_source": "settings" if _host_settings().get("export_dir")
+                        else ("environment" if cfg.export_dir else ""),
+                        "roots": [str(r) for r in _host_roots()]})
+
+    @app.route("/api/host/export_dir", methods=["POST"])
+    def api_host_export_dir():
+        """Set (or clear, with an empty path) the host export folder. It must
+        already exist, be writable, and sit inside an allowed host root."""
+        raw = str((request.get_json(silent=True) or {}).get("path", "")).strip()
+        hs = _host_settings()
+        if not raw:
+            hs.pop("export_dir", None)
+        else:
+            try:
+                p = Path(raw).expanduser().resolve()
+            except OSError:
+                return jsonify({"error": "Not a valid path."}), 400
+            if not p.is_dir():
+                return jsonify({"error": "That host folder doesn't exist."}), 400
+            if not _under_roots(p):
+                return jsonify({"error": "That host folder is outside the allowed locations ("
+                                + ", ".join(str(r) for r in _host_roots()) + ")."}), 400
+            probe = p / f".image-filterer-write-test-{secrets.token_hex(4)}"
+            try:
+                probe.write_text("ok"); probe.unlink()
+            except OSError as exc:
+                return jsonify({"error": f"Can't write to that host folder: {exc.strerror or exc}"}), 400
+            hs["export_dir"] = str(p)
+        _HOST_SETTINGS.write_text(json.dumps(hs))
+        return api_host_settings_get()
+
+    @app.route("/api/ingest/host", methods=["POST"])
+    def api_ingest_host():
+        """One-shot run from a folder already on the host (no upload, no watch)."""
+        data = request.get_json(silent=True) or {}
+        folder = str(data.get("path", "")).strip()
+        if not folder:
+            return jsonify({"error": "No host folder given."}), 400
+        fp = Path(folder).expanduser().resolve()
+        if not fp.is_dir():
+            return jsonify({"error": f"Not a folder on the host: {fp}"}), 400
+        if not state["ingest_lock"].acquire(blocking=False):
+            return jsonify({"error": "Another run is being processed. Please wait."}), 409
+        try:
+            ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            name = str(data.get("name", "")).strip() or fp.name or f"Run {ts}"
+            run_id = db.create(name, folder="")
+            db.update(run_id, folder=f"run{run_id:04d}_{_safe_name(name)}",
+                      status="ingesting", message="Starting…")
+            # Same as a watch: a host-folder run gets the saved auto-export setup.
+            auto_on = _apply_auto_defaults(cfg.runs_dir / f"run{run_id:04d}_{_safe_name(name)}")
+            state["cancel_event"].clear()
+            state["active_ingest"] = run_id
+            from .mirror import is_network_path
+            if is_network_path(fp):
+                mirror = cfg.runs_dir / f"run{run_id:04d}_{_safe_name(name)}" / "mirror"
+                args = (run_id, mirror, fp)
+            else:
+                args = (run_id, fp)
+            threading.Thread(target=_do_ingest, args=args, daemon=True).start()
+            return jsonify({"ok": True, "run_id": run_id, "folder": str(fp), "auto_export": auto_on})
+        except Exception:
+            state["ingest_lock"].release()
+            raise
+
+    # ----------------------------- server-side export
+    #
+    # Copies originals into IMAGE_FILTERER_EXPORT_DIR/<shoot>/ on the server —
+    # typically the team's LucidLink share — so any viewer can deliver picks
+    # without a Chromium browser or the bytes round-tripping through it. Runs in
+    # the background (a big starred set over a cloud mount takes minutes) and
+    # one job at a time, so two people exporting can't race on the same names.
+
+    _export_jobs: Dict[str, Dict[str, object]] = {}
+    _export_lock = threading.Lock()
+    _EXPORT_KEEP = 3600.0      # seconds a finished job's status stays queryable
+
+    def _server_export_info() -> Dict[str, object]:
+        root = _export_dir()
+        return {"enabled": root is not None, "name": root.name if root else "", "path": str(root or "")}
+
+    @app.route("/api/export/server", methods=["POST"])
+    def api_export_server():
+        root = _export_dir()
+        if root is None:
+            return jsonify({"error": "Server export is not configured."}), 400
+        rn = resolve_run()
+        if rn is None:
+            return jsonify({"error": "No run selected."}), 400
+        data = request.get_json(silent=True) or {}
+        paths, missing = _resolve_selection(rn, data)
+        if not paths:
+            return jsonify({"error": "Nothing available to export."}), 400
+        row = db.get(rn.run_id)
+        shoot = _safe_name(row["name"]) if row else f"run{rn.run_id}"
+        dest = root / shoot
+        src = source_root(list(rn.ranked["path"].astype(str)))
+        if export_overlaps_source(dest, src):
+            return jsonify({"error": f"The host export folder would put exports inside this run's photo folder "
+                                     f"({src}). Choose a different host export folder in Settings."}), 400
+        try:
+            ensure_export_root(root)
+            mark_export_dir(dest)
+        except OSError as exc:
+            return jsonify({"error": f"Export folder unavailable: {exc.strerror or exc}"}), 503
+
+        with _export_lock:
+            now = time.time()
+            for jid in [j for j, v in _export_jobs.items()
+                        if v["done"] and now - float(v["finished"]) > _EXPORT_KEEP]:
+                _export_jobs.pop(jid, None)
+            if any(not v["done"] for v in _export_jobs.values()):
+                return jsonify({"error": "Another export is still running — try again when it finishes."}), 409
+            job_id = secrets.token_urlsafe(12)
+            job: Dict[str, object] = {"done": False, "finished": 0.0, "done_count": 0,
+                                      "total": len(paths), "missing": missing,
+                                      "dest": f"{root.name}/{shoot}", "result": None, "error": ""}
+            _export_jobs[job_id] = job
+
+        def progress(done: int, total: int) -> None:
+            job["done_count"] = done
+
+        def run() -> None:
+            try:
+                job["result"] = export_files([Path(p) for p in paths], dest, progress_cb=progress)
+            except Exception as exc:  # noqa: BLE001 — surface it to the poller
+                job["error"] = f"{type(exc).__name__}: {exc}"
+            finally:
+                job["finished"] = time.time()
+                job["done"] = True
+
+        threading.Thread(target=run, name="server-export", daemon=True).start()
+        return jsonify({"ok": True, "job": job_id, "total": len(paths),
+                        "missing": missing, "dest": job["dest"]})
+
+    @app.route("/api/export/server/<job_id>")
+    def api_export_server_status(job_id: str):
+        job = _export_jobs.get(job_id)
+        if job is None:
+            abort(404)
+        return jsonify({k: job[k] for k in ("done", "done_count", "total", "missing",
+                                            "dest", "result", "error")})
+
+    # ----------------------------- auto-export
+    #
+    # Per-shoot, server-side (it's the server that copies, so the settings
+    # can't live in one browser). The selection logic and why it's shaped the
+    # way it is live in auto_export.py; this just feeds it runs and triggers.
+
+    def _auto_run_data(run_id: int) -> Optional[AutoRunData]:
+        rn = get_run(run_id)
+        if rn is None:
+            return None
+        row = db.get(run_id)
+        starred = [p for p, owners in _stars_snapshot(rn).items() if owners]
+        return AutoRunData(run_dir=rn.run_dir, shoot=_safe_name(row["name"]) if row else f"run{run_id}",
+                           frames=rn.ranked, emb=rn.emb, starred=starred,
+                           ocr=ocr.texts(list(rn.ranked["path"].astype(str))) if ocr.enabled else None)
+
+    def _auto_enabled_runs() -> List[int]:
+        out = []
+        for r in db.list():
+            if r["status"] == "ready" and load_auto_settings(cfg.runs_dir / r["folder"]).enabled:
+                out.append(int(r["id"]))
+        return out
+
+    def _auto_embed(texts: List[str]) -> np.ndarray:
+        return _get_text_encoder(cfg.features.context_encoder).embed_texts(list(texts))
+
+    auto = AutoExporter(_auto_run_data, _auto_embed, _export_dir, _auto_enabled_runs,
+                        burst_gap_seconds=cfg.bursts.long_gap_seconds)
+    state["auto_export"] = auto
+
+    def _auto_kick(run_id: int) -> None:
+        auto.start()
+        auto.kick(run_id)
+
+    def _auto_payload(run_id: int) -> Dict[str, object]:
+        row = db.get(run_id)
+        settings = load_auto_settings(cfg.runs_dir / row["folder"])
+        return {"settings": settings.to_dict(), "status": auto.status(run_id),
+                "export_configured": _export_dir() is not None,
+                "export_dir": str(_export_dir() or ""),
+                "categories": list(AUTO_CATEGORIES) + [AUTO_STARRED],
+                "text_on_screen": {"enabled": ocr.enabled, "error": ocr.error}}
+
+    def _auto_run_id() -> Optional[int]:
+        data = request.get_json(silent=True) or {}
+        rid = data.get("run_id", request.args.get("run_id"))
+        try:
+            rid = int(rid)
+        except (TypeError, ValueError):
+            return None
+        return rid if db.get(rid) else None     # a watch can be configured before its first batch
+
+    _AUTO_DEFAULTS = cfg.data_root / "auto_export_defaults.json"
+
+    def _apply_auto_defaults(run_dir: Path) -> bool:
+        """Give a new host-folder run the last-saved auto-export setup (on or
+        off). Returns whether it's on."""
+        try:
+            settings = AutoExportSettings.from_dict(json.loads(_AUTO_DEFAULTS.read_text()))
+        except (OSError, ValueError):
+            return False
+        run_dir.mkdir(parents=True, exist_ok=True)
+        save_auto_settings(run_dir, settings)
+        return settings.enabled
+
+    @app.route("/api/auto_export", methods=["GET"])
+    def api_auto_export_get():
+        rid = _auto_run_id()
+        if rid is None:
+            return jsonify({"error": "No shoot selected."}), 400
+        return jsonify(_auto_payload(rid))
+
+    @app.route("/api/auto_export", methods=["POST"])
+    def api_auto_export_set():
+        rid = _auto_run_id()
+        if rid is None:
+            return jsonify({"error": "No shoot selected."}), 400
+        data = request.get_json(silent=True) or {}
+        settings = AutoExportSettings.from_dict(data.get("settings"))
+        if settings.enabled and _export_dir() is None:
+            return jsonify({"error": "Choose a host export folder first (Settings → Export location)."}), 400
+        run_dir = cfg.runs_dir / db.get(rid)["folder"]
+        run_dir.mkdir(parents=True, exist_ok=True)
+        save_auto_settings(run_dir, settings)
+        # The last-saved setup becomes the template for the next folder watch,
+        # so it can be tuned on a rehearsal and simply be there on the day.
+        try:
+            _AUTO_DEFAULTS.write_text(json.dumps(settings.to_dict()))
+        except OSError:
+            pass
+        _auto_kick(rid)
+        return jsonify(_auto_payload(rid))
+
+    @app.route("/api/auto_export/preview", methods=["POST"])
+    def api_auto_export_preview():
+        """What each folder would hold right now, had auto-export been on from
+        the start. Nothing is copied — this is for tuning before an event."""
+        rid = _auto_run_id()
+        if rid is None:
+            return jsonify({"error": "No shoot selected."}), 400
+        data = request.get_json(silent=True) or {}
+        settings = AutoExportSettings.from_dict(data.get("settings"))
+        try:
+            return jsonify(auto.preview(rid, settings))
+        except Exception as exc:  # noqa: BLE001 — e.g. text encoder unavailable
+            return jsonify({"error": f"Preview failed: {exc}"}), 500
+
     _thumb_cache = OrderedDict()
     _thumb_lock = threading.Lock()
     _THUMB_MAX = 4096                    # entries
@@ -1507,6 +2122,12 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
                     im.draft("RGB", (w * 2, w * 2))  # fast partial JPEG decode
                 except Exception:
                     pass
+                if im.getexif().get(0x0112, 1) != 1:
+                    # Upright, as the camera meant it (and as text-on-screen
+                    # boxes are measured): the re-encoded JPEG drops the
+                    # rotation flag, so a portrait frame would show sideways.
+                    from PIL import ImageOps
+                    im = ImageOps.exif_transpose(im)
                 im.thumbnail((w, w * 10))
                 buf = io.BytesIO()
                 im.convert("RGB").save(buf, format="JPEG", quality=80)
@@ -1662,7 +2283,45 @@ def _serve(app: Flask, host: str, port: int, ssl_context: Optional[Tuple[str, st
         pass
 
 
+def _quiet_third_party_logs() -> None:
+    """Silence routine chatter from the model libraries so that anything left
+    in the server's terminal is worth reading. Set before the models load
+    (they load lazily), and inherited by the OCR worker processes."""
+    import logging
+    import warnings
+    os.environ.setdefault("GLOG_minloglevel", "2")            # MediaPipe / absl info + warnings
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")        # TensorFlow Lite (MediaPipe's runtime)
+    os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
+    os.environ.setdefault("TQDM_DISABLE", "1")                # per-chunk progress bars
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("HF_HUB_VERBOSITY", "error")       # e.g. "unauthenticated requests" notice
+    # The multiprocessing resource tracker runs in its own process: warn-filter via env.
+    os.environ.setdefault("PYTHONWARNINGS", "ignore::UserWarning:multiprocessing.resource_tracker")
+    try:
+        import cv2
+        cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from huggingface_hub.utils import logging as hf_logging
+        hf_logging.set_verbosity_error()
+    except Exception:  # noqa: BLE001
+        pass
+    for name in ("huggingface_hub", "ultralytics", "open_clip", "timm"):
+        logging.getLogger(name).setLevel(logging.ERROR)
+    warnings.filterwarnings("ignore", message=".*unauthenticated requests to the HF Hub.*")
+
+    class _Expected(logging.Filter):
+        # FaRL loads its weights into a ViT-B-16 skeleton built without any.
+        def filter(self, record: logging.LogRecord) -> bool:
+            return "No pretrained weights loaded for model 'ViT-B-16'" not in record.getMessage()
+    logging.getLogger().addFilter(_Expected())
+    for h in logging.getLogger().handlers:
+        h.addFilter(_Expected())
+
+
 def main() -> None:
+    _quiet_third_party_logs()
     ap = argparse.ArgumentParser("image_filterer.server")
     ap.add_argument("--host", type=str, default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8600)
@@ -1687,6 +2346,12 @@ def main() -> None:
         _open_firewall(args.port)
 
     app = create_app(cfg)
+    import atexit
+    atexit.register(app.extensions["image_filterer_close_models"])
+    # Background, so the server is reachable immediately.
+    threading.Thread(target=app.extensions["image_filterer_warm_up"], name="warm-up", daemon=True).start()
+    ocr = app.extensions["image_filterer_ocr"]
+    ocr.activate()
     ip = _primary_ip() if listens_all else args.host
     print(f"Image Filterer (model={cfg.model_path.name})")
     if cfg.password:
@@ -1695,6 +2360,8 @@ def main() -> None:
         print("  auth:   NONE — anyone with the link can browse and edit. "
               "Set IMAGE_FILTERER_PASSWORD before sharing this.")
     print(f"  data:   {cfg.data_root}   (set IMAGE_FILTERER_DATA_ROOT to change)")
+    print(f"  text:   " + (f"reading text on screen with {cfg.ocr.workers} GPU workers ({ocr.engine})"
+                          if ocr.enabled else f"text on screen off — {ocr.error}"))
 
     ssl_context = None
     scheme = "http"

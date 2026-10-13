@@ -177,7 +177,8 @@ def test_watcher_recurses_and_rechecks_repaired_files(tmp_path):
     photo = nested / 'photo.JpG'
     photo.write_bytes(b'bad')
     watcher = HotFolderWatcher(tmp_path, 1, lambda _: True, stable_ticks=1,
-                               decodable=lambda p: p.read_bytes() == b'good')
+                               decodable=lambda p: p.read_bytes() == b'good',
+                               decode_retry_for=0)
     watcher._scan(); watcher._scan()
     assert str(photo) in watcher._unusable
     photo.write_bytes(b'good')
@@ -274,7 +275,7 @@ def test_measurement_config_changes_cache_namespaces(tmp_path):
     assert default._face_meta_kind != changed._face_meta_kind
     baseline = SceneAnalyzer(SceneConfig(), cache)
     assert baseline.cache_id != SceneAnalyzer(SceneConfig(bg_luma=100), cache).cache_id
-    assert baseline.cache_id == SceneAnalyzer(SceneConfig(hero_min_area=.1), cache).cache_id
+    assert baseline.cache_id == SceneAnalyzer(SceneConfig(hero_min_height=.6), cache).cache_id
 
 
 def test_ingestion_publication_and_reload_end_to_end(tmp_path, monkeypatch):
@@ -298,10 +299,12 @@ def test_ingestion_publication_and_reload_end_to_end(tmp_path, monkeypatch):
         return [FeatureBundle(p, file_sha1(p), np.eye(len(paths), dtype=np.float32)[i],
                               np.ones(2), np.zeros(0), np.zeros(2), {}) for i, p in enumerate(paths)]
     monkeypatch.setattr('image_filterer.ingest.load_or_extract', extract)
-    monkeypatch.setattr('image_filterer.ingest.load_model', lambda *a: (None, asdict(cfg.ranker), {}))
+    monkeypatch.setattr('image_filterer.ingest.load_any', lambda *a: ('v1', (None, asdict(cfg.ranker), {})))
     monkeypatch.setattr('image_filterer.ingest.predict', lambda model, x, device: np.arange(len(x), dtype=np.float32))
     result = ingest_folder(photos, cfg, run)
-    assert result == {'n_images': 1, 'n_bursts': 1, 'n_skipped': 1}
+    assert {k: result[k] for k in ('n_images', 'n_bursts', 'n_skipped')} == {'n_images': 1, 'n_bursts': 1, 'n_skipped': 1}
+    assert 'Scoring images' in result['timings'] and all(v >= 0 for v in result['timings'].values())
+    assert json.loads((run / 'ingest_log.jsonl').read_text().splitlines()[-1])['n_images'] == 1
     db.update(rid, status='ready', n_images=1, n_bursts=1)
     app = create_app(cfg)
     # Existing shot labels are absent; don't invoke a text model in this test.
@@ -373,3 +376,63 @@ def test_queued_watch_is_selectable(shoot):
     r = shoot.client.post('/api/select_run', json={'run_id': rid})
     assert r.status_code == 202 and r.json['pending']
 
+
+
+def test_page_on_previous_generation_keeps_working_until_it_reloads(shoot):
+    """Live watch: a new batch lands while someone browses. Their page must keep
+    opening bursts from the generation it shows, not flash shut as 'stale'."""
+    c = shoot.client
+    q = {'run_id': shoot.id}
+    assert c.get('/api/burst/0', query_string={**q, 'version': 2}).status_code == 200   # loads v2
+    new = shoot.paths[0].parent / 'late.jpg'
+    Image.new('RGB', (32, 32), 'green').save(new)
+    frame = pd.concat([shoot.frame, shoot.frame.iloc[:1].assign(
+        filename='late.jpg', path=str(new), burst_id=1, burst_rank=2)], ignore_index=True)
+    def write(stage):
+        frame.to_csv(stage / 'ranked.csv', index=False)
+        frame.iloc[[0, 2]].assign(burst_size=1).to_csv(stage / 'bursts.csv', index=False)
+        np.save(stage / 'search_index.npy', np.eye(3, dtype=np.float32))
+    v = publish_outputs(shoot.run, write)
+    assert v == 4
+    assert c.get('/api/burst/1', query_string={**q, 'version': 4}).status_code == 200   # new page sees new burst
+    old = c.get('/api/burst/0', query_string={**q, 'version': 2})
+    assert old.status_code == 200 and not old.json.get('stale')                          # old page still works
+    assert c.get('/api/burst/1', query_string={**q, 'version': 2}).status_code == 404   # …on ITS generation
+    assert c.get('/api/burst/0', query_string={**q, 'version': 0}).json['stale'] is True # unknown version, no path
+    gone = c.get('/api/burst/0', query_string={**q, 'version': 0, 'path': str(new)})      # …but with the photo:
+    assert gone.status_code == 200 and gone.json['moved'] and gone.json['burst_id'] == 1  # its burst, newest version
+
+
+def test_text_model_warm_up_loads_once_even_with_a_concurrent_search(shoot, monkeypatch):
+    import threading, time
+    import image_filterer.encoders as enc
+    builds = []
+    def slow_build(ctx):
+        builds.append(ctx); time.sleep(0.3)
+        return SimpleNamespace(name=ctx.strip().lower(), embed_texts=lambda _: np.array([[1., 0.]]))
+    monkeypatch.setattr(enc, 'build_text_encoder', slow_build)
+    monkeypatch.setattr(enc, 'context_encoder_has_text_tower', lambda _: True)
+    warm = threading.Thread(target=shoot.app.extensions['image_filterer_warm_up']); warm.start()
+    time.sleep(0.05)                                         # a search arrives mid-load
+    r = shoot.client.get('/api/search', query_string={'run_id': shoot.id, 'q': 'stage'})
+    warm.join()
+    assert r.status_code == 200 and len(builds) == 1
+
+
+def test_generations_no_page_was_shown_are_not_kept_in_memory(shoot):
+    """A live watch publishes a generation per batch; only ones a viewer was
+    actually shown are held after being superseded (they cost a full copy of
+    the run each)."""
+    c = shoot.client
+    q = {'run_id': shoot.id}
+    def write(stage):
+        shoot.frame.to_csv(stage / 'ranked.csv', index=False)
+        shoot.frame.iloc[:1].assign(burst_size=2).to_csv(stage / 'bursts.csv', index=False)
+        np.save(stage / 'search_index.npy', np.eye(2, dtype=np.float32))
+    assert c.get('/api/burst/0', query_string={**q, 'version': 2}).status_code == 200   # a page shows v2
+    v3 = publish_outputs(shoot.run, write)
+    assert c.post('/api/select_run', json=q).status_code == 200    # v3 loaded (warm-up), never shown
+    v4 = publish_outputs(shoot.run, write)
+    assert c.get('/api/burst/0', query_string={**q, 'version': v4}).status_code == 200
+    assert not c.get('/api/burst/0', query_string={**q, 'version': 2}).json.get('stale')       # shown: kept
+    assert c.get('/api/burst/0', query_string={**q, 'version': v3}).json.get('stale') is True  # never shown: dropped

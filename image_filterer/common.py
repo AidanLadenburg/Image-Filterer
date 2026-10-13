@@ -24,11 +24,15 @@ def load_or_extract(
     desc: str = "features",
     chunk_size: int = 64,
     progress_cb: Optional[ProgressCB] = None,
+    extractor: Optional[FeatureExtractor] = None,
 ) -> List[FeatureBundle]:
     """Extract (or load-from-cache) features. Calls ``progress_cb(done, total)``
     after each chunk so callers can drive a progress bar."""
-    cache = FeatureCache(cfg.cache_dir)
-    ex = FeatureExtractor(cfg.features, cache)
+    # Server ingests pass a process-lifetime extractor so multi-batch watchers
+    # do not deserialize several GB of encoder weights for every arrival. CLI
+    # callers keep the old owned/close-on-return lifecycle by default.
+    owns_extractor = extractor is None
+    ex = extractor or FeatureExtractor(cfg.features, FeatureCache(cfg.cache_dir))
     try:
         if progress_cb is None:
             return ex.extract_paths(list(paths), desc=desc, chunk_size=chunk_size)
@@ -40,4 +44,5 @@ def load_or_extract(
             progress_cb(min(start + len(sub), n), n)
         return out
     finally:
-        ex.close()
+        if owns_extractor:
+            ex.close()

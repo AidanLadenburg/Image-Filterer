@@ -20,6 +20,8 @@ from a checkout, a container, or an install:
                                  (default ``$IMAGE_FILTERER_DATA_ROOT/assets``)
 ``IMAGE_FILTERER_PASSWORD``      shared password gating the server
                                  (default unset — auth disabled)
+``IMAGE_FILTERER_EXPORT_DIR``    server-side export folder, e.g. a LucidLink
+                                 share (default unset — option hidden)
 ===============================  ==============================================
 
 The feature cache is keyed by ``(sha1, kind, encoder_id)``, so it is safe to
@@ -168,8 +170,16 @@ class BurstConfig:
     gap_seconds: float = 2.5
 
     short_gap_seconds: float = 0.6      # below this, always merge
-    long_gap_seconds: float = 8.0       # above this, never merge
-    similarity_threshold: float = 0.92  # cosine on L2-normalized SigLIP-full embeddings
+    # Similar frames up to this far apart are still one moment: a photographer
+    # holding a composition and re-shooting it after a pause. 8 s split ~1 in 4
+    # consecutive moments that were near-identical (same pose, same slide) into
+    # separate grid tiles; at 30 s with the guards below, reviewed merges on two
+    # shoots were the same moment (GTC 203 → 177 moments, Rory 65 → 47).
+    long_gap_seconds: float = 30.0
+    similarity_threshold: float = 0.91  # cosine to any of the moment's last `lookback` frames
+    lookback: int = 3                   # so one odd frame (a turn, a flash) doesn't split a moment
+    max_span_seconds: float = 45.0      # a moment never lasts longer than this…
+    anchor_threshold: float = 0.89      # …and every frame still resembles its first one (no slow drift)
 
     # Pixel-identical dedup: cosine >= this AND sha1 differs => same image,
     # different bytes (metadata-only edits, JPEG re-encodes, " 2.jpg" copies).
@@ -184,23 +194,61 @@ class BurstConfig:
 
 @dataclass
 class ShotConfig:
-    """Shot-scale (wide / medium / close) tagging via SigLIP2 zero-shot.
+    """Shot scale (wide / medium / close), from where the frame cuts the
+    speaker's body (scene.py keypoints):
 
-    Face-geometry classification was tried first and abandoned: MediaPipe found a
-    face in only ~2% of keynote frames, collapsing every frame to "wide". Instead
-    each frame is scored on a continuous wide↔close axis in the same SigLIP2
-    joint space search uses::
+      wide   — the whole body is in frame (feet visible), the person is small,
+               or there's no prominent person
+      medium — the frame cuts the body somewhere above the feet
+      close  — cut well above the waist AND the head is big in the frame AND
+               the person fills most of its height (an upward-angled shot of a
+               distant speaker, merely cropped at the waist, isn't a close-up)
 
-        closeness = cos(emb_full, close_prototype) - cos(emb_full, wide_prototype)
+    Distances are in "head-units": eyes → shoulders, vertically. It doesn't
+    shrink when the speaker turns sideways, unlike shoulder width.
 
-    Each prototype is the mean text embedding of a prompt ensemble (see
-    ``shots.py``). Higher = tighter framing. Because closeness is defined against
-    *those* prompts, thresholds and prompts are a matched set — retune together.
+    The earlier SigLIP zero-shot axis (wide vs close text prompts) was fooled by
+    darkness and content — near-black frames came out "close" — and is kept
+    only as a fallback for runs without pose data.
     """
 
     enabled: bool = True
-    wide_max: float = -0.038    # closeness < wide_max   → wide
-    close_min: float = 0.0      # closeness >= close_min → close; between → medium
+    chest_cut: float = 2.2      # close: frame cuts < this many head-units below the shoulders
+    close_head: float = 0.20    # close: eyes → shoulders is at least this much of the frame height
+    close_span: float = 0.6     # close: the person fills at least this much of the frame height
+    medium_min_h: float = 0.3   # a cut-off figure smaller than this is still "wide"
+    # Fallback (no pose data): SigLIP closeness thresholds, matched to the prompts in shots.py
+    wide_max: float = -0.038
+    close_min: float = 0.0
+
+
+# ----------------------------------------------------------- text on screen
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+@dataclass
+class OcrConfig:
+    """Reading the text in each photo (slides, screens, signs) for search and
+    auto-export. PP-OCRv4 English on TensorRT; see ``ocr.py``.
+
+    Every frame is read — burst-mates don't reliably show the same slide.
+    On a GB10, decoding included: 703 photos in ~21 s with four workers (3: 26 s,
+    5: 19 s). It runs in the background and pauses while an ingest is using the
+    GPU, so it never delays photos appearing.
+    """
+
+    # IMAGE_FILTERER_OCR_WORKERS=0 turns it off.
+    workers: int = field(default_factory=lambda: max(0, _env_int("IMAGE_FILTERER_OCR_WORKERS", 4)))
+    # Longest side the detector sees. Slide text is small in a wide stage shot;
+    # 2048 is what the benchmarks (and the engine profile) were tuned at.
+    max_side: int = 2048
+    min_score: float = 0.6       # drop lines the recognizer isn't sure of
 
 
 # --------------------------------------------------------------- app config
@@ -213,6 +261,7 @@ class Config:
     technical: TechnicalConfig = field(default_factory=TechnicalConfig)
     bursts: BurstConfig = field(default_factory=BurstConfig)
     shots: ShotConfig = field(default_factory=ShotConfig)
+    ocr: OcrConfig = field(default_factory=OcrConfig)
     scene: "SceneConfig" = field(default=None)  # populated in __post_init__
 
     # Labeled dataset — used ONLY by `python -m image_filterer.train`.
@@ -246,6 +295,13 @@ class Config:
     @property
     def model_path(self) -> Path:
         return Path(os.environ.get("IMAGE_FILTERER_MODEL_PATH", str(PACKAGE_DIR / "model" / "ranker.pt")))
+
+    @property
+    def export_dir(self) -> Optional[Path]:
+        """Server-side export destination (e.g. a LucidLink share). Unset = the
+        viewer only offers browser downloads and browser-picked local folders."""
+        v = os.environ.get("IMAGE_FILTERER_EXPORT_DIR", "").strip()
+        return Path(v).expanduser() if v else None
 
     @property
     def password(self) -> Optional[str]:

@@ -1,11 +1,11 @@
 """Download the third-party model weights the pipeline needs.
 
-Four files, none of which are in git (they total ~700 MB):
+Four files, none of which are in git (they total ~790 MB):
 
   FaRL-Base-Patch16-LAIONFace20M-ep64.pth   652 MB  face embedding
   face_detection_yunet_2023mar.onnx         227 KB  face detection
   face_landmarker.task                      3.7 MB  eyelid/mouth landmarks
-  yolov8s-pose.pt                            23 MB  person detection (scene tags)
+  yolo11x-pose.pt                           113 MB  people + body keypoints (speaker, shot type, hero)
 
 They land in ``$IMAGE_FILTERER_ASSET_DIR`` (default ``~/.local/share/image-filterer/assets``).
 Re-running is cheap: anything already present is skipped.
@@ -31,7 +31,7 @@ from image_filterer.config import asset_dir
 FARL_NAME = "FaRL-Base-Patch16-LAIONFace20M-ep64.pth"
 YUNET_NAME = "face_detection_yunet_2023mar.onnx"
 LANDMARKER_NAME = "face_landmarker.task"
-YOLO_NAME = "yolov8s-pose.pt"
+YOLO_NAME = "yolo11x-pose.pt"
 
 # (subdir, filename, url)
 ASSETS = [
@@ -43,7 +43,7 @@ ASSETS = [
      "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/"
      "float16/latest/" + LANDMARKER_NAME),
     ("", YOLO_NAME,
-     "https://github.com/ultralytics/assets/releases/download/v8.2.0/" + YOLO_NAME),
+     "https://github.com/ultralytics/assets/releases/download/v8.4.0/" + YOLO_NAME),
 ]
 
 

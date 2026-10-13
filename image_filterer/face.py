@@ -23,6 +23,9 @@ on first use to ``$IMAGE_FILTERER_ASSET_DIR/mp_models/face_landmarker.task``.
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
+import sys
+import threading
 import urllib.request
 import warnings
 from dataclasses import dataclass
@@ -44,6 +47,31 @@ _FACE_LANDMARKER_URL = (
     "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
     "face_landmarker/float16/latest/face_landmarker.task"
 )
+
+
+_STDERR_LOCK = threading.Lock()
+
+
+@contextmanager
+def quiet_native_stderr():
+    """Hide C++ log lines printed while a MediaPipe model is created (absl/TFLite
+    notes such as "Feedback manager requires a model…"). They can't be turned
+    off from Python. Python exceptions are unaffected; only the brief creation
+    window is silenced."""
+    with _STDERR_LOCK:
+        try:
+            sys.stderr.flush()
+            saved = os.dup(2)
+        except (OSError, ValueError):
+            yield
+            return
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, 2)
+            yield
+        finally:
+            os.dup2(saved, 2)
+            os.close(saved); os.close(devnull)
 
 
 def _ensure_face_landmarker_model(model_root: Optional[Path] = None) -> Path:
@@ -131,7 +159,8 @@ class FaceAnalyzer:
             output_face_blendshapes=False,
             output_facial_transformation_matrixes=False,
         )
-        self._landmarker = mp_vision.FaceLandmarker.create_from_options(options)
+        with quiet_native_stderr():
+            self._landmarker = mp_vision.FaceLandmarker.create_from_options(options)
         self.face_expand = face_expand
         self.va = va_provider
 

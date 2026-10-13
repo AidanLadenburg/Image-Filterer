@@ -385,3 +385,121 @@ def serialize_eval_summary(result: Dict[str, object]) -> str:
         },
         indent=2,
     )
+
+
+# ------------------------------------------------------------------ ranker v2
+#
+# What changed and why (held-out tests: leave-one-photographer-out, and
+# contiguous slices of the keynote; see docs/ARCHITECTURE.md):
+#
+#   * Inputs are compressed: each embedding block → 64 dims (standardise + PCA).
+#     With ~400 keepers the 1,671-dim input overfit; compressed it generalises
+#     better (best frame of a burst picked 70% → 75-80%).
+#   * The speaker's expression (52 blendshapes + head pose, scene.py) is an
+#     input — the biggest single gain at picking the best frame of a burst.
+#   * Three seeds, each score standardised against its own training scores,
+#     averaged: less run-to-run variance.
+#   * Training drops photographer-days that contributed only keepers (or only
+#     rejects) — see train.py.
+
+BLOCKS_V2 = ("full", "face", "quality", "expression")
+
+
+def feature_blocks(bundles, scenes=None) -> Dict[str, np.ndarray]:
+    """Raw v2 inputs. ``scenes`` (scene.SceneData per bundle, or None) supplies
+    the expression block; without it the block is zeros (face not measured)."""
+    from .features import _quality_vector
+    from .scene import N_BLENDSHAPES
+    expr_dim = N_BLENDSHAPES + 5
+    return {
+        "full": np.stack([b.emb_full for b in bundles]).astype(np.float32),
+        "face": np.stack([b.emb_face for b in bundles]).astype(np.float32),
+        "quality": np.stack([_quality_vector(b.quality) for b in bundles]).astype(np.float32),
+        "expression": (np.stack([s.expression_vector() for s in scenes]).astype(np.float32) if scenes is not None
+                       else np.zeros((len(bundles), expr_dim), np.float32)),
+    }
+
+
+class _BlockTransform:
+    """Standardise; for embedding blocks, then project onto the top ``pca``
+    principal components. Plain numpy so it serialises trivially."""
+
+    def __init__(self, X: np.ndarray, pca: Optional[int]):
+        self.mean = X.mean(0)
+        self.scale = X.std(0) + 1e-6
+        self.comp = None
+        if pca and X.shape[1] > pca:
+            Z = (X - self.mean) / self.scale
+            _, _, vt = np.linalg.svd(Z - Z.mean(0), full_matrices=False)
+            self.zmean = Z.mean(0)
+            self.comp = vt[:pca].astype(np.float32)
+
+    def __call__(self, X: np.ndarray) -> np.ndarray:
+        Z = (X - self.mean) / self.scale
+        return (Z - self.zmean) @ self.comp.T if self.comp is not None else Z
+
+    def state(self) -> Dict[str, object]:
+        return {"mean": self.mean, "scale": self.scale, "comp": self.comp,
+                "zmean": getattr(self, "zmean", None)}
+
+    @classmethod
+    def from_state(cls, st) -> "_BlockTransform":
+        t = cls.__new__(cls)
+        t.mean, t.scale, t.comp, t.zmean = st["mean"], st["scale"], st["comp"], st["zmean"]
+        return t
+
+
+class RankerV2:
+    def __init__(self, transforms: Dict[str, _BlockTransform], nets: List[RankNet],
+                 stats: List[Tuple[float, float]], meta: Dict[str, object]):
+        self.transforms, self.nets, self.stats, self.meta = transforms, nets, stats, meta
+
+    def _x(self, blocks: Dict[str, np.ndarray]) -> np.ndarray:
+        return np.hstack([self.transforms[n](blocks[n]) for n in BLOCKS_V2]).astype(np.float32)
+
+    def score(self, blocks: Dict[str, np.ndarray], device: torch.device) -> np.ndarray:
+        X = self._x(blocks)
+        out = [(predict(net, X, device) - m) / s for net, (m, s) in zip(self.nets, self.stats)]
+        return np.mean(out, axis=0).astype(np.float32)
+
+
+def fit_v2(blocks: Dict[str, np.ndarray], y: np.ndarray, burst_ids: np.ndarray, cfg: RankerConfig, *,
+           device: torch.device, pca: int = 64, seeds: Sequence[int] = (42, 43, 44),
+           meta: Optional[Dict[str, object]] = None) -> RankerV2:
+    transforms = {n: _BlockTransform(blocks[n], pca if n in ("full", "face") else None) for n in BLOCKS_V2}
+    model = RankerV2(transforms, [], [], dict(meta or {}))
+    X = model._x(blocks)
+    from dataclasses import replace
+    for sd in seeds:
+        net, _ = _train_one(X, y, replace(cfg, seed=int(sd)), device=device, burst_ids=burst_ids)
+        s = predict(net, X, device)
+        model.nets.append(net); model.stats.append((float(s.mean()), float(s.std() + 1e-9)))
+    model.meta.update({"format": "v2", "pca": pca, "seeds": list(seeds), "in_dim": int(X.shape[1])})
+    return model
+
+
+def save_v2(path: Path, model: RankerV2, cfg: RankerConfig) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({
+        "format": "v2",
+        "cfg": asdict(cfg),
+        "meta": model.meta,
+        "transforms": {n: t.state() for n, t in model.transforms.items()},
+        "nets": [net.state_dict() for net in model.nets],
+        "stats": model.stats,
+    }, path)
+
+
+def load_any(path: Path, device: torch.device):
+    """('v2', RankerV2) or ('v1', (RankNet, saved_cfg, meta))."""
+    ck = torch.load(path, map_location=device, weights_only=False)
+    if isinstance(ck, dict) and ck.get("format") == "v2":
+        cfg = RankerConfig(**ck["cfg"])
+        transforms = {n: _BlockTransform.from_state(st) for n, st in ck["transforms"].items()}
+        in_dim = int(ck["meta"]["in_dim"])
+        nets = []
+        for sd in ck["nets"]:
+            net = RankNet(in_dim, cfg.hidden, cfg.dropout).to(device)
+            net.load_state_dict(sd); net.eval(); nets.append(net)
+        return "v2", RankerV2(transforms, nets, [tuple(s) for s in ck["stats"]], ck["meta"])
+    return "v1", load_model(path, device)

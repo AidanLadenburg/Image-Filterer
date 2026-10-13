@@ -26,14 +26,15 @@
 | **Browse by time** | Switch the **Sort** dropdown to *Chronological* to walk the event start to finish — each tile shows its burst's earliest frame. |
 | **Browse by stars** | Switch **Sort** to *Most starred* to bring moments with your team's picks to the top — each tile shows the most-starred frame in its burst. |
 | **Search in plain English** | Type "person at a podium", "robot on stage", "wide shot of the crowd". No tags or keywords needed. |
+| **Search the text on screen** | Type words from a slide, screen or sign — "Vera Rubin", "Groq". Photos showing them come first, marked **T**; small reading slips are forgiven. Text is read on the GPU in the background, a few seconds after photos arrive. |
 | **Filter** | By framing (wide / medium / close), by subject (people / stage), or to solo hero shots only. |
 | **Ungroup** | Click the **Ungroup** pill to turn off burst grouping — one tile per photo instead of one per burst, everything else (search, filters, sort, quality, stars) still applies. |
 | **Open a moment** | Click a tile to see every frame in that burst, ordered best-first or chronilogical, and step through with ← / →. |
 | **Star the ones you want** | Click ☆ on any tile or frame. Stars are saved and shared with everyone looking at the same shoot — a colleague's star shows up on your screen within a few seconds, no reload needed. |
-| **Export** | Original photos, individually or in bulk, sent to the local folder or browser download destination chosen in Settings. |
+| **Export** | Original photos, individually or in bulk, sent to your local device (browser downloads or a chosen folder) or to the host export folder — chosen in Settings. |
 | **Quality slider** | Hide everything below a chosen band so only the strongest photos remain. |
 | **Resize the grid** | Make thumbnails bigger or smaller with the **Size** control or the `+` / `−` keys. |
-| **Watch a folder** | Point it at a shared folder during a live event and photos are added as they arrive. |
+| **Watch a host folder** | Start a run from a folder on the host and keep watching it during a live event — photos are added as they arrive. |
 | **Delete a shoot** | The 🗑 next to the shoot dropdown, with a confirmation that spells out what's removed. |
 
 ---
@@ -46,15 +47,18 @@
 
 ### Adding a shoot
 
-Click **＋ Upload folder**. For a shoot that's already finished:
+Two words used throughout: your **local device** is the computer you're
+browsing from; the **host** is the machine running the app (the Spark).
 
-- **Upload from device** — pick a folder on your own computer. Every photo has
-  to cross the network, so a large shoot can take a long time.
+Click **＋ New run** and choose where the photos are:
 
-If the photos are already on the server (or a mounted drive), use
-[Watch a folder](#watching-a-folder-during-a-live-event) instead and point it at
-the path — nothing is copied, and it works for a finished shoot as well as a live
-one.
+- **Local device** — pick a folder on your own computer and click **Start run**.
+  Every photo has to cross the network, so a large shoot can take a long time.
+- **Host folder** — photos already on the host (a mounted drive, the LucidLink
+  share). Type the path or click **Browse host…**, then **Start run**. Nothing is
+  copied. Tick **Keep watching for new photos** for a
+  [live event](#watching-a-folder-during-a-live-event); leave it off for a
+  finished shoot.
 
 A bar at the top tracks the work from the moment it starts, and its **Reload**
 button lights up when the new photos are live. Only one shoot is processed at a
@@ -63,14 +67,16 @@ cancel.
 
 > **RAW works.** CR3, ARW, NEF and friends are read through the preview the
 > camera embeds in them, so they rank and search alongside your JPEGs. If a shot
-> exists as both a RAW *and* a JPEG, the JPEG is used and the RAW skipped, so
-> nothing appears twice. Downloading a RAW gives you the untouched original file.
+> exists as both a RAW *and* a JPEG, the JPEG is used for ranking and viewing, so
+> nothing appears twice — but every download, export and auto-export of that shot
+> hands out the **RAW**. Downloading a RAW gives you the untouched original file.
 
 ### Watching a folder during a live event
 
-Instead of uploading at the end, point the system at a folder everyone offloads
-to (a LucidLink mount, a NAS — anything the server can read). Open **＋ Upload
-folder → Watch a folder**, paste the path, and hit **Start watching**.
+Instead of uploading at the end, point the system at a host folder everyone
+offloads to (a LucidLink mount, a NAS — anything the host can read). Open
+**＋ New run → Host folder**, pick the folder, keep **Keep watching for new
+photos** ticked, and click **Start run & watch**.
 
 From then on the photo team just offloads cards as usual. New photos are picked
 up and ranked within a minute or two, and a green bar appears for anyone
@@ -83,6 +89,12 @@ through the whole event and take the update when it suits you.
 
 A chip in the header shows it's running. Click **Stop watching** when the event
 is over — it also stops itself after a few quiet hours.
+
+**Cloud folders (LucidLink).** A file can appear in a Lucid folder at its full
+size while its bytes are still uploading from the offload computer. A photo
+that doesn't open yet is retried (backing off to once a minute) for up to 30
+minutes before it's counted as unreadable; the chip shows these as *still
+uploading*. Hidden files and the export folder (below) are never ingested.
 
 ### Starring and exporting
 
@@ -112,6 +124,63 @@ use ZIP. The destination follows the browser's download preferences; browser
 security prevents this app from assigning an arbitrary local path. This option
 works without the local folder API. An unavailable local destination must be
 changed explicitly in Settings.
+
+**Host folder:** a folder on the host — typically `exports/` on the team's
+LucidLink share. Choose it in **Settings → Export location → Choose host
+folder…** (it must already exist and be writable; `IMAGE_FILTERER_EXPORT_DIR`
+sets the default). The host copies originals into
+`<host export folder>/<shoot name>/` itself, so it works from any browser,
+phones included, and nothing passes through your device. Auto-export always
+uses this folder: it runs on the host with no browser open, so it can't send to
+a local device. Files
+appear atomically (never half-written); identical files are skipped and
+same-named different photos get a numbered suffix. One export runs at a time.
+
+### Auto-export to review folders
+
+With a server export folder configured, **⚙ Settings → Auto-export (this
+shoot)** copies the best new photos into review folders as they arrive, so the
+editors work from a shortlist instead of the whole card dump:
+
+```
+<export folder>/<shoot>/Auto/
+    Best/  Hero/  Close/  Wide/ …     one per category you tick
+    Robots/  Partners/ …              one per shot-list item
+    Starred/                          anything anyone stars
+```
+
+- **Strictness** — each folder gets the top X% of *its own* photos (10% of 700
+  photos ≈ 70), so a rare category like Hero isn't crowded out by the rest of
+  the shoot. Frames from the same burst compete like any other photo; how many
+  near-identical ones get through is up to **Look-alikes**. Each block of the
+  event separated by a 45+ minute gap with no photos (an evening event and the
+  next morning's keynote) gets its own top X% — a 1-2 hour keynote is one block.
+- **At least** — small folders aim for this many of their best photos, but only
+  with photos that are also in the top half of the whole shoot (no filler).
+- **Speed** — early in a shoot there's little to compare against, so a photo
+  waits until it's clearly among the best. *Fast* sends sooner with a few
+  extras; *Careful* sends fewer, surer picks.
+- **Look-alikes** — skip a pick that looks almost the same as one already in
+  that folder, whether a burst-mate or a different moment (same pose, same
+  slide). Higher = more variety, fewer photos. A later photo that's clearly
+  better than its already-sent look-alike still goes in (nothing is removed).
+- **Shot list** — each entry becomes a folder with every matching photo.
+  - *Looks like*: describe a shot in plain words ("a robot on stage"). A
+    description only matches photos it fits better than a generic keynote
+    photo, so a shot that hasn't happened leaves its folder empty instead of
+    filling it with near-misses.
+  - *Text on screen*: words shown in the photo ("Vera Rubin") — a product
+    launch slide, a sign. Photos wait until their text has been read.
+
+Untick **Auto Export** to switch it off; its settings collapse and the change
+is saved immediately.
+
+Files keep their original names (a different photo with the same name gets a
+`-2` suffix rather than overwriting), appear atomically, and are **never removed** once sent — even if a photo's rank
+later drops. A burst is only sent once it's finished (the camera has moved on,
+or two minutes have passed), so its best frame isn't beaten by its own next
+shot. Setup saved on any shoot becomes the default for the next folder watch,
+so you can tune it at a rehearsal and just start watching on the day.
 
 **Every export or download is the full-resolution original file** — the same
 bytes off the card. The images on screen are small stand-ins so the page
@@ -149,17 +218,18 @@ guess at the strongest shot of the whole shoot.
 **Representative** — within a burst, the one frame the system picked as the best
 of that group. It's the one shown on the tile.
 
-**Hero** — one person clearly dominating the frame, nobody else prominent, and a
-clean dark background behind them. Think a portrait of a speaker with nothing
-distracting behind.
+**Hero** — the speaker alone (nobody else nearly as big), filling at least
+about half the frame height, against a mostly dark background around them. A
+bit of slide text behind them is fine; a lit screen isn't.
 
-**Shot: wide / medium / close** — how tight the framing is, *not* how big a face
-is. A frame-filling shot of a robot counts as "close" even though there's no
-person in it.
+**Shot: wide / medium / close** — where the frame cuts the speaker's body.
+*Wide*: the whole body is in frame, or the person is small, or there's nobody.
+*Medium*: cut somewhere above the feet. *Close*: cut well above the waist with
+the head big in the frame — an upward-angled shot of a distant speaker that
+just happens to be cropped at the waist stays medium.
 
-**Subject: people / stage** — whether there's a prominent person in the
-foreground. "Stage" means an empty stage, a distant crowd, or a slide — no clear
-main subject.
+**Subject: people / stage** — whether the speaker is prominent. "Stage" means an
+empty stage, a distant figure, or a slide.
 
 **Quality slider** — "top 25%" means the strongest quarter of the shoot by the
 system's own ranking, not a measure of sharpness or exposure. It hides weaker
@@ -222,9 +292,10 @@ It matches on what a photo *looks like*, not on names or text. It has no idea wh
 anyone is. Describe the scene ("two people shaking hands on stage") rather than
 naming a person or a company.
 
-**A great photo is tagged "stage" instead of "people".**
-The people/stage and hero cut-offs were set by eye, and they're among the
-roughest parts of the system. Worth reporting when it looks wrong.
+**A great photo is tagged "stage" instead of "people", or isn't a hero.**
+Those cut-offs are simple thresholds on the speaker's size and the brightness
+around them. Worth reporting when it looks wrong — the measurements are cached,
+so re-tuning costs only a re-ingest.
 
 ---
 ---
@@ -243,6 +314,11 @@ browser page, you can stop here.**
 - **~5 GB disk** for model weights and the feature cache; the cache grows about
   **25 MB per 1,000 images**.
 
+**Text on screen** (OCR) is an optional extra, `pip install -e ".[ocr]"`: PP-OCRv4
+on TensorRT, so it needs a CUDA 13 GPU. The first start builds TensorRT
+engines for the machine (~40 s, then cached in `$IMAGE_FILTERER_DATA_ROOT/models/ocr`).
+Without it the app runs normally and text search simply finds nothing on screen.
+
 Two dependencies are worth knowing about, both installed by `pip install -e .`:
 `rawpy` reads RAW files via their embedded preview, and `pyexiv2` supplies the
 EXIF that PIL won't — RAW capture times and the Sony lens model. Without
@@ -256,14 +332,18 @@ cd Image-Filterer
 
 python -m venv .venv && source .venv/bin/activate
 
-# 1) Install PyTorch matching YOUR CUDA version first — the generic wheel is
-#    often CPU-only. See https://pytorch.org/get-started/locally/
-pip install torch --index-url https://download.pytorch.org/whl/cu121
+# 1) Install the current stable PyTorch and TorchVision pair. Verify the command
+#    for your platform at https://pytorch.org/get-started/locally/.
+#    Current Linux ARM64 wheels include CUDA 13 support for DGX Spark.
+pip install torch torchvision
 
-# 2) Install the package and its remaining dependencies.
-pip install -e .
+# 2) Install the package and its remaining dependencies (+ text on screen).
+pip install -e ".[ocr]"
 
-# 3) Fetch the third-party model weights (~700 MB, one time).
+# 3) Keep runtime state/model caches local to this checkout, then fetch weights.
+export IMAGE_FILTERER_DATA_ROOT="$PWD/data"
+export HF_HOME="$IMAGE_FILTERER_DATA_ROOT/huggingface"
+export YOLO_CONFIG_DIR="$IMAGE_FILTERER_DATA_ROOT/ultralytics"
 python -m scripts.fetch_assets
 ```
 
@@ -274,7 +354,7 @@ python -m scripts.fetch_assets
 | `FaRL-Base-Patch16-LAIONFace20M-ep64.pth` | 652 MB | face embedding |
 | `face_detection_yunet_2023mar.onnx` | 227 KB | face detection |
 | `face_landmarker.task` | 3.7 MB | eyelid / mouth landmarks |
-| `yolov8s-pose.pt` | 23 MB | person detection (subject + hero tags) |
+| `yolo11x-pose.pt` | 113 MB | people + body keypoints (speaker, shot type, hero, expression crop) |
 
 The two encoder backbones (SigLIP2-SO400M, and the ViT-B/16 skeleton FaRL loads
 into) are pulled from HuggingFace by `open_clip` on first use — no action needed,
@@ -343,6 +423,9 @@ Edit `.env.spark`:
   must be able to write the local data directory.
 - To watch an existing folder, set `PHOTO_SOURCE_PATH` to its **absolute host
   path**. It can be a local directory, a LucidLink mount, or a mounted NAS/share.
+- To use a **host export folder** (Settings → Export location), set `EXPORT_PATH`
+  to an absolute, writable host directory (e.g. `exports/` on the Lucid share).
+  It's mounted read-write at `/exports`; `/photos` stays read-only.
 - Optionally change the host port (`SPARK_PORT`, default 8600) or listening IP.
 
 Create the local directory yourself, owned by that account, for example:
@@ -360,7 +443,7 @@ Git and excluded from the image build context; it contains machine paths, not th
 event password.
 
 `PHOTO_SOURCE_PATH` is optional. Without it, `/photos` is an empty placeholder
-and **Upload from device** still works: the browser sends those photos into
+and **＋ New run → Local device** still works: the browser sends those photos into
 `SPARK_DATA_DIR`. With it, Docker exposes the chosen directory read-only at
 `/photos`, because the watcher UI can select only paths already visible inside
 the container. For a large library, mount its stable root and choose an
@@ -432,11 +515,11 @@ Docker traffic.
 There are two ways to add photos:
 
 - To use files already accessible to the Spark, configure `PHOTO_SOURCE_PATH`.
-  In **Watch a folder**, enter **`/photos`** or a subfolder such as
+  In **＋ New run → Host folder**, choose **`/photos`** or a subfolder such as
   `/photos/day-one`. This works for a local folder, LucidLink, or another
   mounted network share.
 - To send files from another computer through the web app, leave
-  `PHOTO_SOURCE_PATH` unset and choose **Upload from device**. These copies are
+  `PHOTO_SOURCE_PATH` unset and choose **＋ New run → Local device**. These copies are
   stored under `SPARK_DATA_DIR`; the watcher and `/photos` are not involved.
 
 This Compose deployment runs **one application container**. Do not scale it:
@@ -481,6 +564,10 @@ checkout, a container, or an install. All are optional.
 | `IMAGE_FILTERER_MODEL_PATH` | `image_filterer/model/ranker.pt` | The production ranker |
 | `IMAGE_FILTERER_TRAIN_ROOT` | `./dataset` | Labeled data, training only |
 | `IMAGE_FILTERER_PASSWORD` | unset (no auth) | Shared password gating the whole server — see [Authentication](#authentication) |
+| `IMAGE_FILTERER_EXPORT_DIR` | unset | Default host export folder (can be changed in Settings), e.g. `exports/` on a LucidLink share |
+| `IMAGE_FILTERER_OCR_WORKERS` | `4` | GPU processes reading text on screen; `0` turns it off. On a GB10: 3 → ~26 s, 4 → ~21 s, 5 → ~19 s per 700 photos |
+| `IMAGE_FILTERER_MEM_CACHE_MB` | `1024` | In-memory copy of the feature/scene/text cache (~10 MB per 1,000 photos). Live runs re-load every photo on each ingest: at 10k photos this is ~2.5 s instead of ~10 s. Past the cap, older entries are read from disk again |
+| `IMAGE_FILTERER_HOST_ROOTS` | home, `/mnt`, `/media`, `/photos`, `/exports` | `:`-separated host locations that **Browse host…** and the host export folder are limited to |
 
 Run storage deliberately defaults **outside the repo** so that git operations,
 cleanups, or a `rm -rf` in the working tree can never destroy live runs. In
@@ -671,35 +758,37 @@ of what you want.
 
 ```bash
 IMAGE_FILTERER_TRAIN_ROOT=./dataset image-filterer-train
-# or: python -m image_filterer.train --train-root ./dataset
+# or, several labeled events:
+python -m image_filterer.train --train-root ./event1 --train-root ./event2
 ```
 
-This writes `image_filterer/model/ranker.pt` and `training_summary.json`. The
-first run extracts features for every labeled frame (the slow part); later runs
-hit the cache and take a minute or two.
+Train to a scratch path first (`IMAGE_FILTERER_MODEL_PATH=/tmp/new.pt`) and
+compare before replacing the shipped model. It writes the model and
+`training_summary.json` next to it. The first run extracts features and measures
+the speaker's pose and expression for every labeled frame (the slow part, a few
+minutes on a GB10); later runs hit the cache. The held-out tests then train ~10
+more models; `--no-eval` skips them.
 
-Expect output like:
-
-```
-[train] 2604 unique labeled frames (pos=400, neg=2204)
-[train] features (2604, 1671) on cuda
-[train] saved .../model/ranker.pt
-[train] holdout AUC=0.9595  mean_cv_auc=0.9346  (eval-only; model uses all data)
-```
+Photographer-days with only one kind of label are left out — someone who handed
+over only their picks would otherwise teach the model their camera and framing
+as "good" (see docs/ARCHITECTURE.md).
 
 ### 3. Read the numbers
 
-`holdout AUC` is the honest one — the probability that a random keeper outranks a
-random reject on frames the model never saw. **Below ~0.85, don't ship it**; look
-for label noise or too few positives first.
+`training_summary.json` → `held_out` has two tests, both on photos the model
+never trained on, never splitting a burst:
 
-The shipped weights come from a final fit on **100% of the labeled data**. The
-holdout split exists only to produce that AUC. This is deliberate: in production
-there's nothing to evaluate against, so holding data back only makes the model
-worse.
+- `leave_one_photographer_out` — rank one photographer's photos with a model
+  trained on everyone else's. The fairest test of a new event.
+- `timeline_slices` — five contiguous parts of each event.
 
-Frames are content-deduped by sha1 before training, and a positive label wins any
-collision — the same image copied into both `Good/` and `Bad/` counts as `Good`.
+Each reports moment-level average precision (`ap`), the share of keepers in the
+top 10% of moments, and how often the best frame of a mixed burst is a keeper.
+The shipped model scores ap ≈ 0.69 / 0.68 and picks the best frame 77% / 83% of
+the time. A new model should beat those before it ships.
+
+The shipped weights come from a final fit on all usable labeled data. Frames are
+content-deduped by sha1, and a positive label wins any collision.
 
 ### 4. Roll out
 
@@ -707,18 +796,17 @@ Restart the server. Existing runs keep their old scores; re-ingest a folder to
 score it with the new model. Keep the previous checkpoint around — swapping back
 is just `IMAGE_FILTERER_MODEL_PATH=/path/to/old.pt`.
 
-The checkpoint stores the feature-group flags it was trained with, and ingestion
-rebuilds the input vector from *those*, not from the current config. An older
-checkpoint keeps scoring correctly even after config changes.
+Older (v1) checkpoints still load and score; the checkpoint records which
+encoders it was trained on, and ingest refuses to run with different ones.
 
 ## How the filters are derived
 
 | Filter | Values | How it's derived |
 |---|---|---|
 | **Search** | free text | SigLIP2 text tower against cached image embeddings — same joint space, no re-embedding. Warm queries ~50 ms. |
-| **Shot** | wide / medium / close | Zero-shot SigLIP2 wide↔close axis. This is *framing scale*, not face size. |
-| **Subject** | people / stage | Largest YOLO person box vs. frame area. |
-| **★ Hero** | on / off | One dominant person, no second prominent person, clean dark background. |
+| **Shot** | wide / medium / close | Where the frame cuts the speaker's body (YOLO11 body keypoints). |
+| **Subject** | people / stage | The speaker's box vs. frame area. |
+| **★ Hero** | on / off | The speaker alone, ≥ 45% of the frame height, mostly dark area around them. |
 | **Quality** | top N% | Percentile of `score_s12_after_hard` over the run. A percentile rather than a raw score because the ranker's units are arbitrary and differ per run. Applies to bursts, frames within a burst and search hits — but **not** to `/api/starred`, where a human pick outranks the model's opinion. |
 | **Sort** | rank / time / stars | Rank uses the burst representative's score. Time and stars both change *which frame is shown* on the tile, not just burst order: time shows each burst's earliest frame; stars shows its most-starred frame (not a sum — one frame with 3 stars outranks a burst where five frames each got 1). A burst with no stars keeps its normal representative under the stars sort. Whatever's shown, opening the burst still lets you browse and star every frame in it. |
 
@@ -818,10 +906,13 @@ image_filterer/
   technical.py    sharpness / exposure / eye-openness metrics
   bursts.py       EXIF + embedding burst clustering
   shots.py        wide/medium/close tagging
-  scene.py        YOLO person detection → subject + hero tags
+  scene.py        pose + the speaker + their expression → subject / hero tags
   pipeline.py     shared steps: burst columns, search index, CSV writers
   ingest.py       inference-only ingestion of one folder
   hotfolder.py    polling watcher that folds new arrivals into a live run
+  ocr.py          text on screen: background GPU OCR workers, cached by content
+  textmatch.py    typo-tolerant matching of a query against the text read
+  auto_export.py  live selection into review folders
   train.py        offline training entry point
   server.py       Flask app + HTTP API
   db.py           SQLite run registry
@@ -834,10 +925,10 @@ docs/             architecture and tuning notes
 
 ## Known limits
 
-- **One event's worth of training data.** The model has never been evaluated
-  against a second shoot; cross-event generalization is unmeasured. Treat the
-  0.96 AUC as "on material resembling that one shoot."
-- **Scene thresholds were set by eye** on that same dataset. The raw detector
+- **One event's worth of training data.** Held-out tests leave out a
+  photographer or a stretch of the keynote, but it's still one event; more
+  labeled events would help more than any model change tested.
+- **Shot / hero thresholds were set by eye** on two shoots. The raw detector
   outputs are cached, so re-tuning costs nothing but a re-ingest.
 - **Camera identity uses EXIF.** Bodies with distinct serial numbers stay separate;
   identical body/lens combinations without serial numbers can still merge.

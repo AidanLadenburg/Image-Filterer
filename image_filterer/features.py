@@ -13,6 +13,11 @@ so swapping encoders does not invalidate unrelated entries.
 
 from __future__ import annotations
 
+import os
+import queue
+import threading
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Sequence
@@ -23,7 +28,7 @@ from tqdm import tqdm
 
 from .cache_io import FeatureCache, Sha1Memo, config_namespace
 from .config import FeatureConfig
-from .imaging import open_image
+from .imaging import open_image, ordered_map
 from .encoders import FrozenEncoder, build_encoder, build_face_encoder
 from .face import FaceAnalyzer, FaceMetrics, maybe_get_va
 
@@ -92,14 +97,24 @@ QUALITY_KEYS: Sequence[str] = (
 )
 
 
+# Eye / mouth openness when no face was found. These used to default to
+# 1.0 / 0.0 — "eyes far wider open than any real face" — and the ranker learned
+# that faceless frames (wide stage shots, slides) were keepers: on a new shoot
+# they scored ~3 points above frames with a face. Typical values instead; the
+# face_detected flag already says the face is missing.
+NO_FACE_EAR = 0.25
+NO_FACE_MAR = 0.05
+
+
 def _quality_vector(q: Dict[str, float]) -> np.ndarray:
     sharpness_log = float(np.log1p(max(0.0, q.get("sharpness", 0.0))))
+    face = bool(q.get("face_detected", 0.0))
     src = {
         "face_detected": q.get("face_detected", 0.0),
         "face_frac": q.get("face_frac", 0.0),
         "sharpness_log": sharpness_log,
-        "ear": q.get("ear", 1.0),
-        "mar": q.get("mar", 0.0),
+        "ear": q.get("ear", NO_FACE_EAR) if face else NO_FACE_EAR,
+        "mar": q.get("mar", NO_FACE_MAR) if face else NO_FACE_MAR,
         "exposure_clipped_frac": q.get("exposure_clipped_frac", 0.0),
         "face_centeredness": q.get("face_centeredness", 0.5),
     }
@@ -107,6 +122,23 @@ def _quality_vector(q: Dict[str, float]) -> np.ndarray:
 
 
 # --------------------------------------------------------------------- driver
+
+
+@contextmanager
+def _single_threaded_opencv():
+    """While a worker pool runs one image per thread, OpenCV's own 20-way
+    parallelism inside each call only oversubscribes the cores."""
+    try:
+        import cv2
+    except ImportError:
+        yield
+        return
+    prev = cv2.getNumThreads()
+    cv2.setNumThreads(1)
+    try:
+        yield
+    finally:
+        cv2.setNumThreads(prev)
 
 
 class FeatureExtractor:
@@ -132,6 +164,23 @@ class FeatureExtractor:
             {k: getattr(fc, k) for k in measured},
             {k: getattr(defaults, k) for k in measured})
         self._extract_body = getattr(fc, "extract_body", True)
+        # Face analyzers for the decode/face worker threads, pooled: a worker
+        # borrows one and hands it back. (Keeping one per *thread* leaked: each
+        # ingest starts new worker threads, so a long-lived extractor — the
+        # server keeps one for its lifetime — gained ~12 analyzers, ~1.1 GB,
+        # per hot-folder re-ingest and was OOM-killed mid-event.)
+        self._idle_ans: "queue.SimpleQueue" = queue.SimpleQueue()
+        self._an_lock = threading.Lock()
+        self._thread_ans: list = []            # every analyzer created, for close()
+        # Cumulative timings, read by ingest for its per-phase breakdown.
+        self.stats = {"decode_face_s": 0.0, "embed_s": 0.0, "computed": 0, "cached": 0,
+                      "scene_shared": 0, "scene_s": 0.0}
+        # Set by ingest for the duration of a run: new photos then get their
+        # scene analysis (scene.py) from the decode done here instead of a
+        # second full decode later. Cached scenes are skipped as before.
+        self.scene_analyzer = None
+        self._scene_pool = None
+        self._scene_futures: list = []
 
     @property
     def _face_meta_kind(self) -> str:
@@ -152,21 +201,69 @@ class FeatureExtractor:
             self._face_enc = build_face_encoder(self.fc.face_encoder)
         return self._face_enc
 
+    @contextmanager
+    def _pooled_face_analyzer(self):
+        """Borrow an analyzer for one image. The pool only grows to the number
+        of threads working at once, however many ingests run."""
+        try:
+            an = self._idle_ans.get_nowait()
+        except queue.Empty:
+            an = self._new_face_analyzer()
+            with self._an_lock:
+                self._thread_ans.append(an)
+        try:
+            yield an
+        finally:
+            self._idle_ans.put(an)
+
     def _face_analyzer(self):
         if self._face_an is None:
-            if getattr(self.fc, "skip_face_detect", False):
-                self._face_an = _StubFaceAnalyzer()
-            elif getattr(self.fc, "face_detector", "mediapipe") == "yunet":
-                from .face import YuNetTwoStageAnalyzer
-                self._face_an = YuNetTwoStageAnalyzer(
-                    face_expand=self.fc.face_expand,
-                    det_size=getattr(self.fc, "yunet_det_size", 1024),
-                    score_threshold=getattr(self.fc, "yunet_score_threshold", 0.6),
-                )
-            else:
-                va = maybe_get_va() if self.fc.use_valence_arousal else None
-                self._face_an = FaceAnalyzer(face_expand=self.fc.face_expand, va_provider=va)
+            self._face_an = self._new_face_analyzer()
         return self._face_an
+
+    def _new_face_analyzer(self):
+        if getattr(self.fc, "skip_face_detect", False):
+            return _StubFaceAnalyzer()
+        if getattr(self.fc, "face_detector", "mediapipe") == "yunet":
+            from .face import YuNetTwoStageAnalyzer
+            return YuNetTwoStageAnalyzer(
+                face_expand=self.fc.face_expand,
+                det_size=getattr(self.fc, "yunet_det_size", 1024),
+                score_threshold=getattr(self.fc, "yunet_score_threshold", 0.6),
+            )
+        va = maybe_get_va() if self.fc.use_valence_arousal else None
+        return FaceAnalyzer(face_expand=self.fc.face_expand, va_provider=va)
+
+    # ----- scene stage: one GPU thread, overlapping the CPU work -----
+
+    SCENE_QUEUE_MAX = 16      # prepared frames waiting (~25 MB each): backpressure
+
+    def _submit_scene(self, scene, sha1: str, prep) -> None:
+        """Hand a prepared frame to the scene thread. Pose + expression run
+        one frame at a time (~55 ms); done inline they stalled the decode
+        workers, so ingest was bounded by their sum, not their max."""
+        from concurrent.futures import ThreadPoolExecutor
+        if self._scene_pool is None:
+            self._scene_pool = ThreadPoolExecutor(1, thread_name_prefix="scene")
+            self._scene_slots = threading.BoundedSemaphore(self.SCENE_QUEUE_MAX)
+        self._scene_slots.acquire()
+
+        def run():
+            t = time.perf_counter()
+            try:
+                scene.analyze(sha1, prep)
+            finally:
+                self.stats["scene_s"] += time.perf_counter() - t
+                self._scene_slots.release()
+        self._scene_futures.append(self._scene_pool.submit(run))
+        self.stats["scene_shared"] += 1
+
+    def wait_scenes(self) -> None:
+        """Block until every submitted scene is analyzed and cached; re-raise
+        the first failure."""
+        futures, self._scene_futures = self._scene_futures, []
+        for f in futures:
+            f.result()
 
     # ----- public -----
 
@@ -197,66 +294,84 @@ class FeatureExtractor:
         # detector-specific (ns is "" for MediaPipe → existing cache stays valid).
         body_id = ctx_id + self._face_ns
 
-        # Phase 1: face crops + quality + VA (cheap-ish, per-image).
-        # We need crops to embed, so compute these for any path missing either
-        # the crops cache, the embeddings, or the meta.
-        face_crops: Dict[int, Image.Image] = {}
-        full_imgs: Dict[int, Image.Image] = {}
-        body_crops: Dict[int, Image.Image] = {}
+        # Phase 1: decode + face crop + quality, then each encoder's own
+        # preprocessing — all per-image CPU work, run on a thread pool (face
+        # analyzers borrowed from a pool; YuNet/MediaPipe instances aren't shareable). This
+        # was the whole bottleneck: one core decoding, detecting and resizing
+        # 25 MP photos while the GPU idled. Workers hand back small model-ready
+        # tensors, so full-resolution images are freed as soon as they're used.
+        # Same transforms, same order, same batches → identical embeddings.
         quality: Dict[int, Dict[str, float]] = {}
-
-        need_recrop = []
+        need_recrop, need_full, need_face, need_body = [], set(), set(), set()
         for i, (p, sha) in enumerate(zip(paths, sha1s)):
-            need_emb = (
-                not self.cache.has(sha, "emb_full", ctx_id)
-                or not self.cache.has(sha, "emb_face", face_id)
-                or (self._extract_body and not self.cache.has(sha, "emb_body", body_id))
-                or self.cache.load_meta(sha, self._face_meta_kind) is None
-            )
-            if need_emb:
+            if not self.cache.has(sha, "emb_full", ctx_id):
+                need_full.add(i)
+            if not self.cache.has(sha, "emb_face", face_id):
+                need_face.add(i)
+            if self._extract_body and not self.cache.has(sha, "emb_body", body_id):
+                need_body.add(i)
+            if i in need_full or i in need_face or i in need_body \
+                    or self.cache.load_meta(sha, self._face_meta_kind) is None:
                 need_recrop.append(i)
 
-        if need_recrop:
-            an = self._face_analyzer()
-            for i in tqdm(need_recrop, desc=f"{desc}: face/quality"):
+        ctx = self._ctx_encoder() if need_full or need_body else None
+        face_enc = self._face_encoder() if need_face else None
+        full_t, face_t, body_t = {}, {}, {}
+
+        scene = self.scene_analyzer
+
+        def prep(i):
+            with open_image(paths[i]) as source:
+                im = source.convert("RGB")
+            sp = None
+            if scene is not None and not scene.cached(sha1s[i]):
+                # The scene step's own decode (reduced-size JPEG decode +
+                # resize, exactly as before so results are unchanged), done
+                # here on the worker threads alongside the face work.
                 with open_image(paths[i]) as source:
-                    im = source.convert("RGB")
+                    sp = scene.prepare(source)
+            with self._pooled_face_analyzer() as an:
                 full, face, body, m = an.analyze(im)
-                full_imgs[i] = full
-                face_crops[i] = face
-                body_crops[i] = body
-                quality[i] = m.as_dict()
-                self.cache.save_meta(sha1s[i], self._face_meta_kind, quality[i])
+            return (i, m,
+                    ctx.prepare(full) if i in need_full else None,
+                    face_enc.prepare(face) if i in need_face else None,
+                    ctx.prepare(body) if i in need_body else None, sp)
 
-        # Phase 2: embeddings batch by (encoder, kind). Only embed what isn't cached:
-        # when the user switches just the face encoder, full/body should stay cached.
-        full_to_embed = [(i, full_imgs[i]) for i in need_recrop if not self.cache.has(sha1s[i], "emb_full", ctx_id)]
-        face_to_embed = [(i, face_crops[i]) for i in need_recrop if not self.cache.has(sha1s[i], "emb_face", face_id)]
-        body_to_embed = (
-            [(i, body_crops[i]) for i in need_recrop if not self.cache.has(sha1s[i], "emb_body", body_id)]
-            if self._extract_body else []
-        )
+        t_prep = time.perf_counter()
+        if need_recrop:
+            with _single_threaded_opencv():
+                for i, m, ft, fa, bt, sp in tqdm(ordered_map(prep, need_recrop), total=len(need_recrop),
+                                             desc=f"{desc}: decode/face/prep",
+                                             disable=os.environ.get("TQDM_DISABLE") == "1"):
+                    quality[i] = m.as_dict()
+                    if sp is not None:                 # pose + expression on their own thread
+                        self._submit_scene(scene, sha1s[i], sp)
+                    self.cache.save_meta(sha1s[i], self._face_meta_kind, quality[i])
+                    if ft is not None:
+                        full_t[i] = ft
+                    if fa is not None:
+                        face_t[i] = fa
+                    if bt is not None:
+                        body_t[i] = bt
 
-        ctx = None
-        face_enc = None
-        if full_to_embed or body_to_embed:
-            ctx = self._ctx_encoder()
-        if face_to_embed:
-            face_enc = self._face_encoder()
+        self.stats["decode_face_s"] += time.perf_counter() - t_prep
+        self.stats["computed"] += len(need_recrop)
+        self.stats["cached"] += len(paths) - len(need_recrop)
+        t_embed = time.perf_counter()
+        # Phase 2: embeddings, batched per (encoder, kind). Only what isn't cached:
+        # when the user switches just the face encoder, full/body stay cached.
+        for kind, tensors, enc, enc_id in (
+                ("emb_full", full_t, ctx, lambda e: e.encoder_id()),
+                ("emb_body", body_t, ctx, lambda e: e.encoder_id() + self._face_ns),
+                ("emb_face", face_t, face_enc, lambda e: e.encoder_id() + self._face_ns)):
+            if not tensors:
+                continue
+            order = sorted(tensors)
+            X = enc.embed_tensors([tensors[i] for i in order], batch_size=self.fc.batch_size)
+            for i, z in zip(order, X):
+                self.cache.save(sha1s[i], kind, {"z": z.astype(np.float32)}, enc_id(enc))
 
-        if full_to_embed:
-            X = ctx.embed_images([img for _, img in full_to_embed], batch_size=self.fc.batch_size)
-            for (i, _), z in zip(full_to_embed, X):
-                self.cache.save(sha1s[i], "emb_full", {"z": z.astype(np.float32)}, ctx.encoder_id())
-        if body_to_embed:
-            X = ctx.embed_images([img for _, img in body_to_embed], batch_size=self.fc.batch_size)
-            for (i, _), z in zip(body_to_embed, X):
-                self.cache.save(sha1s[i], "emb_body", {"z": z.astype(np.float32)}, ctx.encoder_id() + self._face_ns)
-        if face_to_embed:
-            X = face_enc.embed_images([img for _, img in face_to_embed], batch_size=self.fc.batch_size)
-            for (i, _), z in zip(face_to_embed, X):
-                self.cache.save(sha1s[i], "emb_face", {"z": z.astype(np.float32)}, face_enc.encoder_id() + self._face_ns)
-
+        self.stats["embed_s"] += time.perf_counter() - t_embed
         # Phase 3: assemble bundles from cache (everything is now present).
         bundles: List[FeatureBundle] = []
         for p, sha in zip(paths, sha1s):
@@ -295,5 +410,13 @@ class FeatureExtractor:
         return base + self._face_ns
 
     def close(self) -> None:
+        if self._scene_pool is not None:
+            self._scene_pool.shutdown(wait=True)
+            self._scene_pool = None
+        with self._an_lock:
+            thread_ans, self._thread_ans = self._thread_ans, []
+        for an in thread_ans:
+            an.close()
+        self._idle_ans = queue.SimpleQueue()
         if self._face_an is not None:
             self._face_an.close()

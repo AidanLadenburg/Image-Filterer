@@ -13,9 +13,50 @@ detectors work happily at preview scale.
 from __future__ import annotations
 
 import io
+import os
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Callable, Iterable, Iterator, Optional, TypeVar
 
 from PIL import Image
+
+T = TypeVar("T")
+R = TypeVar("R")
+
+
+def cpu_workers() -> int:
+    """Threads for per-image CPU work (decode, face detection).
+
+    Threads rather than processes: PIL's JPEG decoder, OpenCV and rawpy all
+    release the GIL, so decoding genuinely runs in parallel — and threads can
+    hand decoded images to the GPU stage without pickling 25 MP arrays.
+    Override with IMAGE_FILTERER_CPU_WORKERS (1 = the old serial behaviour).
+    """
+    env = os.environ.get("IMAGE_FILTERER_CPU_WORKERS", "").strip()
+    if env.isdigit() and int(env) > 0:
+        return int(env)
+    return max(1, min(12, (os.cpu_count() or 2) - 2))
+
+
+def ordered_map(fn: Callable[[T], R], items: Iterable[T], workers: Optional[int] = None,
+                lookahead: Optional[int] = None) -> Iterator[R]:
+    """``map(fn, items)`` on a thread pool: results in input order, with at most
+    ``lookahead`` in flight so decoded full-resolution images can't pile up in
+    memory faster than the consumer (usually the GPU) drains them."""
+    workers = workers or cpu_workers()
+    if workers <= 1:
+        yield from map(fn, items)
+        return
+    lookahead = lookahead or workers * 2
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="img") as pool:
+        pending: deque = deque()
+        for item in items:
+            pending.append(pool.submit(fn, item))
+            if len(pending) >= lookahead:
+                yield pending.popleft().result()
+        while pending:
+            yield pending.popleft().result()
 
 # Extensions handled via the RAW path. Decoding needs `rawpy`; without it these
 # files are reported undecodable and skipped, exactly as they were before.
@@ -112,8 +153,10 @@ def is_decodable(path) -> bool:
         return False
 
 
-def validated_images(paths, run_dir):
-    """Decode each unchanged source only once, including during live updates."""
+def validated_images(paths, run_dir, prevalidated=None, stats=None):
+    """Decode each unchanged source only once, including during live updates.
+    ``prevalidated``: {path: [size, mtime_ns]} the caller already decoded (the
+    hot-folder watcher checks every arrival) — not decoded a second time."""
     import json
     from .pipeline import atomic_write
     cache_path = run_dir / "validated.json"
@@ -121,19 +164,28 @@ def validated_images(paths, run_dir):
         previous = json.loads(cache_path.read_text())
     except (OSError, ValueError):
         previous = {}
-    valid, signatures = [], {}
-    for p in paths:
+    def check(p):
+        """(path, signature) if usable, else None. Decodes only new/changed files."""
         try:
             st = p.stat()
             signature = [st.st_size, st.st_mtime_ns]
-            if previous.get(str(p)) != signature and not is_decodable(p):
-                continue
+            if previous.get(str(p)) != signature and (prevalidated or {}).get(str(p)) != signature:
+                decoded.append(1)
+                if not is_decodable(p):
+                    return None
             after = p.stat()
             if signature != [after.st_size, after.st_mtime_ns]:
-                continue
+                return None
         except OSError:
-            continue
-        valid.append(p)
-        signatures[str(p)] = signature
+            return None
+        return p, signature
+
+    valid, signatures, decoded = [], {}, []
+    for res in ordered_map(check, paths):          # full decodes, in parallel
+        if res is not None:
+            valid.append(res[0])
+            signatures[str(res[0])] = res[1]
     atomic_write(cache_path, lambda tmp: tmp.write_text(json.dumps(signatures)))
+    if stats is not None:
+        stats["decoded"] = len(decoded)
     return valid

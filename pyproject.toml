@@ -17,6 +17,7 @@ dependencies = [
     "flask>=3.0",
     "opencv-python>=4.9",       # YuNet face detection
     "open_clip_torch>=2.24",    # SigLIP2 context encoder + FaRL backbone
+    "transformers>=4.40",       # tokenizer used by the default SigLIP2 encoder
     "mediapipe>=0.10",          # eyelid / mouth landmarks
     "ultralytics>=8.2",         # YOLOv8-pose person detection
     "tqdm>=4.65",
@@ -25,8 +26,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Alternate context encoders (DINOv2, C-RADIO). Not needed for the default.
-encoders = ["transformers>=4.40"]
+# Compatibility extra retained for existing install commands; transformers is now required.
+encoders = []
+# Text on screen (OCR) for search and auto-export: PP-OCRv4 on TensorRT. Needs a
+# CUDA 13 GPU; without these the app runs normally and says OCR is unavailable.
+ocr = [
+    "rapidocr>=3.9,<3.10",      # ocr.py patches its TensorRT engine builder; re-check before bumping
+    "onnxruntime>=1.18",        # rapidocr imports it even when TensorRT does the work
+    "tensorrt-cu13>=10",
+    "cuda-python>=13",
+    "rapidfuzz>=3",             # typo-tolerant matching of the text read
+]
 dev = ["pytest>=7.4"]
 
 [project.scripts]
