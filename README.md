@@ -567,6 +567,8 @@ checkout, a container, or an install. All are optional.
 | `IMAGE_FILTERER_EXPORT_DIR` | unset | Default host export folder (can be changed in Settings), e.g. `exports/` on a LucidLink share |
 | `IMAGE_FILTERER_OCR_WORKERS` | `4` | GPU processes reading text on screen; `0` turns it off. On a GB10: 3 → ~26 s, 4 → ~21 s, 5 → ~19 s per 700 photos |
 | `IMAGE_FILTERER_MEM_CACHE_MB` | `1024` | In-memory copy of the feature/scene/text cache (~10 MB per 1,000 photos). Live runs re-load every photo on each ingest: at 10k photos this is ~2.5 s instead of ~10 s. Past the cap, older entries are read from disk again |
+| `IMAGE_FILTERER_ALERT_WEBHOOK` | unset | Slack/Teams incoming-webhook URL. Problems that last 30 s (Lucid unmounted, export folder missing, a crashed watch, auto-export or text-reading errors, low memory/disk) are posted when they start and again when resolved; they always show as a red banner for every viewer and as a desktop notification on the server |
+| `IMAGE_FILTERER_PORT` | `8600` | Port used by `start.sh` |
 | `IMAGE_FILTERER_HOST_ROOTS` | home, `/mnt`, `/media`, `/photos`, `/exports` | `:`-separated host locations that **Browse host…** and the host export folder are limited to |
 
 Run storage deliberately defaults **outside the repo** so that git operations,
@@ -875,6 +877,20 @@ starred frame); unfurled, "this exact frame is starred."
 
 ## Robustness
 
+- **The server restarts itself.** `start.sh` supervises it: if it exits
+  without Ctrl+C, it's back within ~6 s; if it stops answering, it's restarted
+  within ~2 min. The password stays in that window's memory (never on disk),
+  so signed-in viewers stay signed in. Logged to `data/launcher.log`.
+- **A live watch survives restarts.** It resumes into the same run, with the
+  photos already in it known, so nothing is re-added. Stop watching (or a new
+  watch) ends it for good.
+- **Problems are visible.** A red banner for every viewer, a desktop
+  notification, and optionally a webhook (`IMAGE_FILTERER_ALERT_WEBHOOK`) when
+  Lucid is unreachable, the export folder is missing, the watch died, or
+  auto-export/text reading report errors.
+- **A missing export folder is never recreated.** If Lucid drops, exports
+  pause ("Export folder unavailable") and auto-export catches up when it's
+  back, without duplicates; nothing is written to local disk.
 - **Bad files never kill a run.** Every file is checked for decodability first;
   corrupt, truncated, or unsupported files are skipped and counted in the
   finish message. A run only fails if *nothing* decoded.

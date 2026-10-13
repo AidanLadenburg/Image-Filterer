@@ -111,7 +111,9 @@ class HotFolderWatcher:
         decode_budget: float = 15.0,          # seconds of decode checks per scan before ingesting
         mirror_dir: Optional[Path] = None,    # network folder → copy each photo here once (see mirror.py)
         full_check_every: float = 60.0,       # re-stat already-handled files this often
+        on_stopped: Optional[Callable[[], None]] = None,   # stopped on purpose (user, or idle) — not a crash
     ) -> None:
+        self._on_stopped = on_stopped
         self.folder = Path(folder)
         self.run_id = run_id
         self._ingest = ingest
@@ -227,10 +229,16 @@ class HotFolderWatcher:
             if time.time() - self._last_new > self.stop_after_idle:
                 with self._lock:
                     self._status.last_error = "stopped: no new photos for a long time"
+                self._stop.set()                  # deliberate: not reported as a crashed watch
                 break
             self._stop.wait(self._current_interval())
         with self._lock:
             self._status.watching = False
+        if self._on_stopped is not None:
+            try:
+                self._on_stopped()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _scan(self) -> None:
         """Cheap pass: find new names, and decide which have finished copying."""
@@ -240,6 +248,9 @@ class HotFolderWatcher:
             with self._lock:
                 self._status.last_error = f"cannot read folder: {exc}"
             return
+        with self._lock:                       # readable again (e.g. Lucid back): clear the stale error
+            if self._status.last_error.startswith("cannot read folder"):
+                self._status.last_error = ""
 
         seen_now: Set[str] = set()
         due: List[str] = []                    # stable files whose decode check is due

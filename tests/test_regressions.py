@@ -345,7 +345,7 @@ def test_hotfolder_server_failure_keeps_batch_and_cancel_stops_watch(shoot, monk
     from image_filterer.hotfolder import HotFolderWatcher
     def closure(fn, key):
         return dict(zip(fn.__code__.co_freevars, (v.cell_contents for v in fn.__closure__)))[key]
-    hot = closure(shoot.app.view_functions['api_hotfolder_start'], '_hot_ingest')
+    hot = closure(closure(shoot.app.view_functions['api_hotfolder_start'], '_start_watch'), '_hot_ingest')
     state = closure(hot, 'state')
     watcher = HotFolderWatcher(shoot.paths[0].parent, shoot.id, lambda batch: hot(batch, watcher), batch_cooldown=0)
     watcher._ready.add(str(shoot.paths[0]))

@@ -52,7 +52,7 @@ from .export import (ensure_export_root, export_files, export_overlaps_source, m
                      source_root)
 from .ingest import ingest_folder
 from .ocr import OcrService
-from .pipeline import output_dir, read_version
+from .pipeline import atomic_write, output_dir, read_version
 from .stars import StarStore
 from .textmatch import match_scores as text_match_scores, snippet as text_snippet
 
@@ -883,6 +883,79 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         hw = state["hotfolder"]
         return jsonify(hw.status() if hw is not None else {"watching": False})
 
+    # An active watch survives a restart (crash, auto-restart, reboot): it's
+    # recorded here and resumed by main() into the same run. Removed when the
+    # watch is stopped on purpose (Stop watching, a new watch, long idle).
+    watch_file = cfg.data_root / "active_watch.json"
+
+    def _start_watch(fp: Path, run_id: int, name: str, *, scan_interval=None, cooldown=None,
+                     known: Optional[Set[str]] = None):
+        from .hotfolder import HotFolderWatcher
+        from .mirror import is_network_path
+
+        def ingest_batch(batch):
+            return _hot_ingest(batch, hw)
+
+        def stopped():
+            try:
+                if json.loads(watch_file.read_text()).get("run_id") == run_id:
+                    watch_file.unlink()
+            except (OSError, ValueError):
+                pass
+
+        network = is_network_path(fp)
+        mirror = (cfg.runs_dir / f"run{run_id:04d}_{_safe_name(name)}" / "mirror") if network else None
+        # New photos are decode-checked on first sight (the check is what
+        # proves a file complete; RAW files wait one scan). Network/cloud
+        # folders (Lucid): ingest is cheap once photos are mirrored locally,
+        # so scan and batch more eagerly.
+        si = float(scan_interval if scan_interval is not None else (2.0 if network else 5.0))
+        cd = float(cooldown if cooldown is not None else (5.0 if network else 20.0))
+        hw = HotFolderWatcher(fp, run_id, ingest_batch, scan_interval=si, batch_cooldown=cd,
+                              mirror_dir=mirror, known=known, on_stopped=stopped)
+        state["hotfolder"] = hw
+        atomic_write(watch_file, lambda tmp: tmp.write_text(json.dumps(
+            {"path": str(fp), "run_id": run_id, "name": name, "scan_interval": si, "cooldown": cd})))
+        hw.start()
+        return hw
+
+    def _resume_watch() -> Optional[int]:
+        """Pick up the watch that was running when the server last stopped
+        unexpectedly. Files already in the run are passed as known, so the run
+        never republishes with only part of its photos while they're rechecked."""
+        try:
+            w = json.loads(watch_file.read_text())
+        except (OSError, ValueError):
+            return None
+        row = db.get(int(w.get("run_id", -1)))
+        if not row or row["status"] not in ("ready", "queued", "ingesting"):
+            watch_file.unlink(missing_ok=True)
+            return None
+        fp, run_dir = Path(w["path"]), cfg.runs_dir / row["folder"]
+        mirror = run_dir / "mirror"
+        known: Set[str] = set()
+        try:
+            local = list(json.loads((run_dir / "validated.json").read_text()))
+        except (OSError, ValueError):
+            local = []
+        try:
+            raws = pd.read_csv(run_dir / "ranked.csv", usecols=["raw_path"])["raw_path"].dropna().astype(str)
+            local += [p for p in raws if p]
+        except (OSError, ValueError, KeyError):
+            pass
+        for p in local:
+            q = Path(p)
+            try:
+                known.add(str(fp / q.relative_to(mirror)) if mirror in q.parents else str(q))
+            except ValueError:
+                pass
+        _start_watch(fp, int(w["run_id"]), w.get("name") or row["name"], scan_interval=w.get("scan_interval"),
+                     cooldown=w.get("cooldown"), known=known)
+        db.update(int(w["run_id"]), message=f"Watching — resumed after a restart ({len(known)} photos already in).")
+        return int(w["run_id"])
+
+    app.extensions["image_filterer_resume_watch"] = _resume_watch
+
     @app.route("/api/hotfolder/start", methods=["POST"])
     def api_hotfolder_start():
         data = request.get_json(silent=True) or {}
@@ -906,23 +979,7 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         # A live watch inherits the last-saved auto-export setup (on or off).
         _apply_auto_defaults(cfg.runs_dir / f"run{run_id:04d}_{_safe_name(name)}")
 
-        from .hotfolder import HotFolderWatcher
-        def ingest_batch(batch):
-            return _hot_ingest(batch, hw)
-
-        from .mirror import is_network_path
-        network = is_network_path(fp)
-        mirror = (cfg.runs_dir / f"run{run_id:04d}_{_safe_name(name)}" / "mirror") if network else None
-        # New photos are decode-checked on first sight (the check is what
-        # proves a file complete; RAW files wait one scan). Network/cloud
-        # folders (Lucid): ingest is cheap once photos are mirrored locally,
-        # so scan and batch more eagerly.
-        hw = HotFolderWatcher(fp, run_id, ingest_batch,
-                              scan_interval=float(data.get("scan_interval", 2.0 if network else 5.0)),
-                              batch_cooldown=float(data.get("cooldown", 5.0 if network else 20.0)),
-                              mirror_dir=mirror)
-        state["hotfolder"] = hw
-        hw.start()
+        _start_watch(fp, run_id, name, scan_interval=data.get("scan_interval"), cooldown=data.get("cooldown"))
         auto_on = load_auto_settings(cfg.runs_dir / f"run{run_id:04d}_{_safe_name(name)}").enabled
         return jsonify({"ok": True, "run_id": run_id, "folder": str(fp), "auto_export": auto_on})
 
@@ -2014,6 +2071,27 @@ def create_app(cfg: Optional[Config] = None) -> Flask:
         auto.start()
         auto.kick(run_id)
 
+    # ----------------------------- health: one list of what's wrong right now
+    from .health import HealthMonitor, check as _health_check
+
+    def _health_probe() -> Dict[str, str]:
+        errors = {}
+        for rid in _auto_enabled_runs():
+            err = auto.status(rid).get("last_error")
+            if err:
+                row = db.get(rid)
+                errors[row["name"] if row else f"run {rid}"] = err
+        return _health_check(hotfolder=state["hotfolder"], export_dir=_export_dir(), auto_errors=errors,
+                             ocr_status=ocr.status(), data_root=cfg.data_root)
+
+    health = HealthMonitor(_health_probe)
+    app.extensions["image_filterer_health"] = health     # started by main(), not by tests building apps
+
+    @app.route("/api/health", methods=["GET"])
+    def api_health():
+        problems = health.problems() if health._thread is not None else list(_health_probe().values())
+        return jsonify({"ok": not problems, "problems": problems})
+
     def _auto_payload(run_id: int) -> Dict[str, object]:
         row = db.get(run_id)
         settings = load_auto_settings(cfg.runs_dir / row["folder"])
@@ -2352,6 +2430,10 @@ def main() -> None:
     threading.Thread(target=app.extensions["image_filterer_warm_up"], name="warm-up", daemon=True).start()
     ocr = app.extensions["image_filterer_ocr"]
     ocr.activate()
+    app.extensions["image_filterer_health"].start()
+    resumed = app.extensions["image_filterer_resume_watch"]()
+    if resumed is not None:
+        print(f"  watch:  resumed watching for run {resumed} after a restart")
     ip = _primary_ip() if listens_all else args.host
     print(f"Image Filterer (model={cfg.model_path.name})")
     if cfg.password:
@@ -2360,6 +2442,8 @@ def main() -> None:
         print("  auth:   NONE — anyone with the link can browse and edit. "
               "Set IMAGE_FILTERER_PASSWORD before sharing this.")
     print(f"  data:   {cfg.data_root}   (set IMAGE_FILTERER_DATA_ROOT to change)")
+    print("  alerts: banner + desktop notification" + (" + webhook" if os.environ.get("IMAGE_FILTERER_ALERT_WEBHOOK")
+                                                       else " (set IMAGE_FILTERER_ALERT_WEBHOOK for Slack/Teams)"))
     print(f"  text:   " + (f"reading text on screen with {cfg.ocr.workers} GPU workers ({ocr.engine})"
                           if ocr.enabled else f"text on screen off — {ocr.error}"))
 

@@ -293,9 +293,14 @@
   #ae-chip { flex: 0 0 auto; color: var(--text-dim); font-size: 12px; white-space: nowrap; }
   #settings-close { margin-left: auto; }
   #export-toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 200; padding: 12px 18px; background: var(--panel); border: 1px solid var(--accent); border-radius: 8px; max-width: 90vw; }
+  /* Live problems (Lucid down, export folder missing, …): everyone sees it. */
+  #health-banner { position: sticky; top: 0; z-index: 30; padding: 8px 16px; background: #7a1f24;
+    color: #fff; font-weight: 600; border-bottom: 1px solid #b33a40; }
+  #health-banner div + div { margin-top: 2px; }
 </style>
 </head>
 <body>
+<div id="health-banner" role="alert" hidden></div>
 
 <header class="app-toolbar">
   <div class="toolbar-main">
@@ -1768,6 +1773,16 @@ async function pollActive() {
   } catch (e) {}
 }
 
+// ---- health: anything stopping photos coming in or going out ----
+async function pollHealth() {
+  try {
+    const d = await (await fetch("/api/health")).json();
+    const b = $("#health-banner");
+    b.replaceChildren(...(d.problems || []).map(t => { const e = document.createElement("div"); e.textContent = "⚠ " + t; return e; }));
+    b.hidden = !(d.problems || []).length;
+  } catch (e) {}
+}
+
 // ---- hot folder (watch-a-folder) status ----
 async function pollHotFolder() {
   try {
@@ -2305,6 +2320,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   setInterval(pollStars, 3000);
   pollHotFolder();
   setInterval(pollHotFolder, 5000);
+  pollHealth();
+  setInterval(pollHealth, 10000);
   initAuto();
   initHostDialog();
   pollAuto();
