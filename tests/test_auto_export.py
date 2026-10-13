@@ -171,6 +171,7 @@ def test_server_round_trip_copies_into_auto_folders(shoot, tmp_path, monkeypatch
                                              "settle_seconds": 0, "outputs": {**ONLY_BEST, "Starred": True}}}
     assert c.post('/api/auto_export', json=body).status_code == 400      # no export dir yet
     root = tmp_path / 'lucid' / 'exports'
+    (root).mkdir(parents=True, exist_ok=True)              # the share is mounted
     monkeypatch.setenv('IMAGE_FILTERER_EXPORT_DIR', str(root))
     d = c.post('/api/auto_export', json=body).json
     assert d['settings']['enabled'] and d['export_configured']
@@ -193,6 +194,7 @@ def test_server_round_trip_copies_into_auto_folders(shoot, tmp_path, monkeypatch
 
 
 def test_new_watch_inherits_last_saved_setup(shoot, tmp_path, monkeypatch):
+    (tmp_path / 'exports').mkdir(parents=True, exist_ok=True)              # the share is mounted
     monkeypatch.setenv('IMAGE_FILTERER_EXPORT_DIR', str(tmp_path / 'exports'))
     c = shoot.client
     c.post('/api/auto_export', json={'run_id': shoot.id, 'settings': {
@@ -263,6 +265,7 @@ def test_auto_export_refuses_to_write_into_the_photo_folder(shoot, monkeypatch):
 
 
 def test_one_shot_host_run_inherits_saved_setup(shoot, tmp_path, monkeypatch):
+    (tmp_path / 'exports').mkdir(parents=True, exist_ok=True)              # the share is mounted
     monkeypatch.setenv('IMAGE_FILTERER_EXPORT_DIR', str(tmp_path / 'exports'))
     c = shoot.client
     c.post('/api/auto_export', json={'run_id': shoot.id, 'settings': {'enabled': True, 'top_percent': 5}})

@@ -50,6 +50,7 @@ def test_watcher_skips_hidden_files_and_export_folder(tmp_path):
     (tmp_path / 'card' / '.keep.jpg.partial').write_bytes(b'ok')
     (tmp_path / '.hidden').mkdir()
     (tmp_path / '.hidden' / 'x.jpg').write_bytes(b'ok')
+    (tmp_path / 'exports').mkdir()
     exports = ensure_export_root(tmp_path / 'exports')
     (exports / 'shoot').mkdir()
     (exports / 'shoot' / 'pick.jpg').write_bytes(b'ok')
@@ -81,6 +82,7 @@ def test_server_export_endpoint(shoot, tmp_path, monkeypatch):
     assert c.post('/api/export/server', json={'run_id': shoot.id, 'paths': [str(shoot.paths[0])]}).status_code == 400
 
     root = tmp_path / 'lucid' / 'exports'
+    (root).mkdir(parents=True, exist_ok=True)              # the share is mounted
     monkeypatch.setenv('IMAGE_FILTERER_EXPORT_DIR', str(root))
     assert c.get('/api/state').json['server_export'] == {'enabled': True, 'name': 'exports', 'path': str(root)}
     outside = tmp_path / 'secret.jpg'
@@ -321,7 +323,7 @@ def test_raw_is_what_gets_handed_out(shoot, tmp_path, monkeypatch):
     tok = c.post('/api/download/prepare', json={**q, 'paths': [str(p) for p in shoot.paths]}).json['token']
     names = zipfile.ZipFile(io.BytesIO(c.get('/api/download/zip', query_string={'token': tok}).data)).namelist()
     assert sorted(names) == ['best.CR3', 'early.jpg']                                  # zip
-    root = tmp_path / 'exports'; monkeypatch.setenv('IMAGE_FILTERER_EXPORT_DIR', str(root))
+    root = tmp_path / 'exports'; root.mkdir(); monkeypatch.setenv('IMAGE_FILTERER_EXPORT_DIR', str(root))
     job = c.post('/api/export/server', json={**q, 'paths': [str(shoot.paths[0])]}).json['job']
     for _ in range(100):
         if c.get(f'/api/export/server/{job}').json['done']: break
@@ -398,3 +400,13 @@ def test_validation_skips_files_the_watcher_already_decoded(tmp_path, monkeypatc
     stats = {}
     imaging.validated_images([a, b], run, {str(a): [st.st_size + 1, st.st_mtime_ns]}, stats)
     assert stats['decoded'] == 0                    # both remembered from the last ingest
+
+
+def test_missing_export_root_is_never_created(tmp_path):
+    """Lucid unmounted: the export folder vanished. Recreating it would write
+    exports to local disk inside the bare mount point (and block remounting)."""
+    import pytest
+    mount = tmp_path / 'lucid'; mount.mkdir()                 # bare mount point
+    with pytest.raises(FileNotFoundError):
+        ensure_export_root(mount / 'ai-jhh-selector-tool-export')
+    assert not any(mount.iterdir())

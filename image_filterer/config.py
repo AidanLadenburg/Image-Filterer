@@ -21,7 +21,9 @@ from a checkout, a container, or an install:
 ``IMAGE_FILTERER_PASSWORD``      shared password gating the server
                                  (default unset — auth disabled)
 ``IMAGE_FILTERER_EXPORT_DIR``    server-side export folder, e.g. a LucidLink
-                                 share (default unset — option hidden)
+                                 share (default unset — option hidden). Must
+                                 exist; never created (a missing one means its
+                                 share is unmounted)
 ===============================  ==============================================
 
 The feature cache is keyed by ``(sha1, kind, encoder_id)``, so it is safe to

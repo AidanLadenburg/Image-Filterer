@@ -28,9 +28,17 @@ ProgressCB = Callable[[int, int], None]  # (done, total)
 
 
 def ensure_export_root(root: Path) -> Path:
-    """Create the export root (if needed) and drop the hot-folder marker in it."""
+    """Check the export root is there and drop the hot-folder marker in it.
+
+    Never creates it: the folder is chosen in Settings, where it must already
+    exist. If it's missing now, its share is unmounted (Lucid dropped) — and
+    creating it would put "exports" on this machine's local disk, inside the
+    bare mount point, where they'd also stop Lucid from mounting again. The
+    callers report the error and auto-export retries on its next pass."""
     root = Path(root)
-    root.mkdir(parents=True, exist_ok=True)
+    if not root.is_dir():
+        import errno
+        raise FileNotFoundError(errno.ENOENT, "export folder not found (is its share mounted?)", str(root))
     marker = root / EXPORT_MARKER
     if not marker.exists():
         marker.write_text("Exports from Image Filterer. The hot folder never ingests this directory.\n")
